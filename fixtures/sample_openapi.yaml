@@ -1,0 +1,49 @@
+openapi: 3.0.3
+info:
+  title: FirstCall Demo API
+  version: 1.0.0
+servers:
+  - url: https://api.firstcall.local
+paths:
+  /v1/customers/{customer_id}/notes:
+    post:
+      operationId: createCustomerNote
+      summary: Create customer note
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: customer_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [note, source]
+              properties:
+                note:
+                  type: string
+                source:
+                  type: string
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, status]
+                properties:
+                  id:
+                    type: string
+                  status:
+                    type: string
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer

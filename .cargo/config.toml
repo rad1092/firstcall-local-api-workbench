@@ -1,0 +1,8 @@
+[env]
+CC_x86_64_pc_windows_gnullvm = { value = ".cargo\\firstcall-clang.cmd", relative = true }
+CXX_x86_64_pc_windows_gnullvm = { value = ".cargo\\firstcall-clang.cmd", relative = true }
+AR_x86_64_pc_windows_gnullvm = { value = ".cargo\\firstcall-ar.cmd", relative = true }
+
+[target.x86_64-pc-windows-gnullvm]
+linker = ".cargo\\firstcall-clang.cmd"
+ar = ".cargo\\firstcall-ar.cmd"
