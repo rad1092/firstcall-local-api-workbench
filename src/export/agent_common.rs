@@ -121,6 +121,15 @@ pub(crate) fn template_to_agent_slots(text: &str) -> String {
     slot_regex.replace_all(text, "$${$1}").to_string()
 }
 
+pub(crate) fn sanitize_url_template_for_agent(url_template: &str) -> String {
+    let normalized = template_to_agent_slots(url_template);
+    let parseable = template_to_url_placeholders(&normalized);
+    if Url::parse(&parseable).is_err() {
+        return normalized;
+    }
+    sanitize_query_params(&normalized)
+}
+
 pub(crate) fn sanitized_header_value(header: &HeaderField) -> String {
     if header.key.eq_ignore_ascii_case("authorization") {
         if header.value.to_ascii_lowercase().starts_with("basic ") {
@@ -258,7 +267,7 @@ pub(crate) fn safe_canonical_recipe(recipe: &Recipe) -> Value {
     json!({
         "name": recipe_slug(&recipe.name),
         "method": recipe.method.to_ascii_uppercase(),
-        "url_template": template_to_agent_slots(&recipe.url_template),
+        "url_template": sanitize_url_template_for_agent(&recipe.url_template),
         "auth_type": auth_type(&recipe.auth_style),
         "headers": headers_map(recipe),
         "query": query_map(recipe),
@@ -325,4 +334,40 @@ fn template_to_url_placeholders(text: &str) -> String {
         Regex::new(r"\$\{\s*[A-Za-z0-9_\-]+\s*\}").expect("valid dollar brace regex");
     let replaced = double_brace.replace_all(text, "slot");
     dollar_brace.replace_all(&replaced, "slot").to_string()
+}
+
+fn sanitize_query_params(normalized_url: &str) -> String {
+    let (without_fragment, fragment) = normalized_url
+        .split_once('#')
+        .map_or((normalized_url, None), |(before, after)| {
+            (before, Some(after))
+        });
+    let Some((base, query)) = without_fragment.split_once('?') else {
+        return normalized_url.to_string();
+    };
+    if query.is_empty() {
+        return normalized_url.to_string();
+    }
+
+    let sanitized_query = query
+        .split('&')
+        .map(|part| {
+            let Some((key, value)) = part.split_once('=') else {
+                return part.to_string();
+            };
+            if is_secret_key(key) {
+                format!("{key}={}", env_ref(&secret_env_for_key(key, value)))
+            } else {
+                format!("{key}={value}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let mut output = format!("{base}?{sanitized_query}");
+    if let Some(fragment) = fragment {
+        output.push('#');
+        output.push_str(fragment);
+    }
+    output
 }

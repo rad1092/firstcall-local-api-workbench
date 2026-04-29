@@ -108,6 +108,35 @@ cargo run --bin firstcall-cli -- package `
   --out ./dist/my-agent-tool
 ```
 
+Try the local verified fixture:
+
+```powershell
+cargo run --bin firstcall-cli -- explain --recipe-json fixtures/verified-agent-recipe.json
+```
+
+```powershell
+cargo run --bin firstcall-cli -- package `
+  --recipe-json fixtures/verified-agent-recipe.json `
+  --out ./dist/sample-agent-tool
+```
+
+Expected output tree:
+
+```text
+dist/sample-agent-tool/
+  recipe.yaml
+  verified.lock.json
+  skill.md
+  policy.json
+  mcp-server/
+    package.json
+    tsconfig.json
+    src/server.ts
+    README.md
+```
+
+This packages an already-verified recipe JSON. It does not execute an HTTP request, does not verify npm or TypeScript compilation, and does not export raw secrets.
+
 The generated MCP server is a template artifact. Rust tests do not run `npm install`, `npm build`, or TypeScript compilation.
 
 ## CI

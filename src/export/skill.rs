@@ -2,6 +2,7 @@ use crate::model::{BodyTemplate, Recipe};
 
 use super::agent_common::{
     PRODUCT_LABEL, TAGLINE, all_env_requirements, destructive_method, export_slots,
+    sanitize_url_template_for_agent,
 };
 
 pub fn recipe_to_skill_markdown(recipe: &Recipe) -> String {
@@ -48,7 +49,10 @@ pub fn recipe_to_skill_markdown(recipe: &Recipe) -> String {
     lines.push(String::new());
     lines.push("## Request".to_string());
     lines.push(format!("- Method: {}", recipe.method.to_ascii_uppercase()));
-    lines.push(format!("- URL: {}", recipe.url_template));
+    lines.push(format!(
+        "- URL: {}",
+        sanitize_url_template_for_agent(&recipe.url_template)
+    ));
     lines.push(format!("- Body: {}", body_label(&recipe.body_template)));
     lines.push(String::new());
     lines.push("## Safety rules".to_string());

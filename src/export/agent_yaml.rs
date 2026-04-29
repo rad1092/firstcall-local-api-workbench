@@ -8,7 +8,7 @@ use crate::model::{AuthStyle, Recipe};
 
 use super::agent_common::{
     ExportSlot, TAGLINE, all_env_requirements, auth_type, body_template_value, export_slots,
-    headers_map, query_map, recipe_slug,
+    headers_map, query_map, recipe_slug, sanitize_url_template_for_agent,
 };
 
 #[derive(Serialize)]
@@ -61,7 +61,7 @@ pub fn recipe_to_agent_yaml(recipe: &Recipe) -> Result<String> {
         name: recipe_slug(&recipe.name),
         description: TAGLINE.to_string(),
         method: recipe.method.to_ascii_uppercase(),
-        url_template: recipe.url_template.clone(),
+        url_template: sanitize_url_template_for_agent(&recipe.url_template),
         auth: auth_yaml(&recipe.auth_style),
         headers: headers_map(recipe),
         query: query_map(recipe),

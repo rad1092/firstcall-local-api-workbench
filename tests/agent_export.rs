@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use chrono::{DateTime, Utc};
 use firstcall::export::agent_package::{export_agent_package, is_agent_export_eligible};
@@ -13,6 +14,9 @@ use serde_json::Value;
 use tempfile::tempdir;
 
 const RAW_SECRET: &str = "sk_test_raw_secret_123";
+const RAW_QUERY_SECRET: &str = "raw_secret_123";
+const RAW_BASIC_USERNAME: &str = "raw_basic_username";
+const RAW_BASIC_PASSWORD: &str = "raw_basic_password";
 
 #[test]
 fn verified_recipe_can_export_and_unverified_recipe_cannot() {
@@ -97,6 +101,110 @@ fn package_export_creates_expected_files_without_raw_secrets() {
     }
 }
 
+#[test]
+fn url_placeholders_are_normalized_in_agent_artifacts() {
+    let recipe = fake_recipe("POST", "https://api.example.com/users/{{user_id}}");
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+
+    let yaml = fs::read_to_string(out.path().join("recipe.yaml")).expect("yaml");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+    let combined = read_all_files(out.path()).join("\n");
+
+    assert!(yaml.contains("${user_id}"));
+    assert!(server.contains("${user_id}"));
+    assert!(!combined.contains("{{user_id}}"));
+    assert!(!combined.contains("%24%7Buser_id%7D"));
+}
+
+#[test]
+fn url_secret_query_params_are_sanitized_without_percent_encoded_placeholders() {
+    let mut recipe = fake_recipe(
+        "GET",
+        &format!("https://api.example.com/search?api_key={RAW_QUERY_SECRET}&q={{{{query}}}}"),
+    );
+    recipe.slots.push(RuntimeSlot {
+        name: "query".to_string(),
+        location: SlotLocation::Query,
+        required: true,
+        current_value: Some("alice".to_string()),
+        description: "Search query".to_string(),
+        confidence: Confidence::High,
+    });
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let combined = read_all_files(out.path()).join("\n");
+
+    assert!(!combined.contains(RAW_QUERY_SECRET));
+    assert!(combined.contains("${FIRSTCALL_API_KEY}"));
+    assert!(combined.contains("${query}"));
+    assert!(!combined.contains("%24%7BFIRSTCALL_API_KEY%7D"));
+    assert!(!combined.contains("%24%7Bquery%7D"));
+}
+
+#[test]
+fn basic_auth_generated_server_encodes_env_credentials() {
+    let recipe = basic_auth_recipe();
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+    let combined = read_all_files(out.path()).join("\n");
+
+    assert!(server.contains("Buffer.from"));
+    assert!(server.contains("FIRSTCALL_USERNAME"));
+    assert!(server.contains("FIRSTCALL_PASSWORD"));
+    assert!(!combined.contains(RAW_BASIC_USERNAME));
+    assert!(!combined.contains(RAW_BASIC_PASSWORD));
+}
+
+#[test]
+fn generated_server_template_has_stricter_types_and_header_defaulting() {
+    let recipe = fake_recipe("POST", "https://api.example.com/users/{{user_id}}");
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+
+    assert!(server.contains("type ToolArgs"));
+    assert!(server.contains("Record<string, string>"));
+    assert!(server.contains("RequestInit"));
+    assert!(server.contains("setDefaultHeader"));
+}
+
+#[test]
+fn cli_explain_fixture_succeeds() {
+    let output = Command::new(env!("CARGO_BIN_EXE_firstcall-cli"))
+        .args([
+            "explain",
+            "--recipe-json",
+            "fixtures/verified-agent-recipe.json",
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains("Eligible for agent export: true"));
+}
+
+#[test]
+fn cli_package_fixture_creates_agent_package() {
+    let out = tempdir().expect("tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_firstcall-cli"))
+        .args([
+            "package",
+            "--recipe-json",
+            "fixtures/verified-agent-recipe.json",
+            "--out",
+            out.path().to_str().expect("temp path"),
+        ])
+        .output()
+        .expect("run cli");
+
+    assert!(output.status.success());
+    assert!(out.path().join("recipe.yaml").exists());
+    assert!(out.path().join("mcp-server/src/server.ts").exists());
+}
+
 fn fake_recipe(method: &str, url_template: &str) -> Recipe {
     Recipe {
         id: None,
@@ -120,6 +228,14 @@ fn fake_recipe(method: &str, url_template: &str) -> Recipe {
         },
         slots: vec![
             RuntimeSlot {
+                name: "user_id".to_string(),
+                location: SlotLocation::Path,
+                required: true,
+                current_value: Some("user_123".to_string()),
+                description: "User identifier".to_string(),
+                confidence: Confidence::High,
+            },
+            RuntimeSlot {
                 name: "email".to_string(),
                 location: SlotLocation::Body,
                 required: true,
@@ -139,6 +255,43 @@ fn fake_recipe(method: &str, url_template: &str) -> Recipe {
         last_success_at: Some(verified_time()),
         last_success_status: Some(200),
     }
+}
+
+fn basic_auth_recipe() -> Recipe {
+    let mut recipe = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    recipe.headers_template.clear();
+    recipe.body_template = BodyTemplate::None;
+    recipe.auth_style = AuthStyle::Basic {
+        username_slot: "username".to_string(),
+        password_slot: "password".to_string(),
+    };
+    recipe.slots = vec![
+        RuntimeSlot {
+            name: "user_id".to_string(),
+            location: SlotLocation::Path,
+            required: true,
+            current_value: Some("user_123".to_string()),
+            description: "User identifier".to_string(),
+            confidence: Confidence::High,
+        },
+        RuntimeSlot {
+            name: "username".to_string(),
+            location: SlotLocation::Auth,
+            required: true,
+            current_value: Some(RAW_BASIC_USERNAME.to_string()),
+            description: String::new(),
+            confidence: Confidence::High,
+        },
+        RuntimeSlot {
+            name: "password".to_string(),
+            location: SlotLocation::Auth,
+            required: true,
+            current_value: Some(RAW_BASIC_PASSWORD.to_string()),
+            description: String::new(),
+            confidence: Confidence::High,
+        },
+    ];
+    recipe
 }
 
 fn verified_time() -> DateTime<Utc> {

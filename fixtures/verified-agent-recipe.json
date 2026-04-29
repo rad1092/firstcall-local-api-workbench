@@ -1,0 +1,62 @@
+{
+  "id": null,
+  "name": "Example Update User",
+  "method": "POST",
+  "url_template": "https://api.example.com/users/{{user_id}}?api_key=<redacted>",
+  "headers_template": [
+    {
+      "key": "Authorization",
+      "value": "Bearer <redacted>",
+      "required": true,
+      "description": "Bearer token",
+      "confidence": "high"
+    },
+    {
+      "key": "Content-Type",
+      "value": "application/json",
+      "required": true,
+      "description": "JSON request body",
+      "confidence": "high"
+    }
+  ],
+  "query_template": [],
+  "body_template": {
+    "json": {
+      "template": "{\"email\":\"{{email}}\"}"
+    }
+  },
+  "auth_style": {
+    "bearer": {
+      "token_slot": "bearer_token",
+      "header_name": "Authorization"
+    }
+  },
+  "slots": [
+    {
+      "name": "user_id",
+      "location": "path",
+      "required": true,
+      "current_value": null,
+      "description": "User identifier",
+      "confidence": "high"
+    },
+    {
+      "name": "email",
+      "location": "body",
+      "required": true,
+      "current_value": null,
+      "description": "Updated email address",
+      "confidence": "high"
+    },
+    {
+      "name": "bearer_token",
+      "location": "auth",
+      "required": true,
+      "current_value": "<redacted>",
+      "description": "Bearer token from environment",
+      "confidence": "high"
+    }
+  ],
+  "last_success_at": "2026-04-29T00:00:00Z",
+  "last_success_status": 200
+}
