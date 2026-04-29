@@ -2,6 +2,8 @@
 
 FirstCall is a native local-first desktop tool for turning pasted `curl` commands, prose API docs, or OpenAPI snippets into one executable HTTP request. It helps fill runtime values, execute the call, classify the outcome, persist redacted attempts locally, and promote successful attempts into reusable recipes.
 
+FirstCall Agent Recipes adds a second surface to that workflow: **Verified API tool recipes for AI agents.** A recipe becomes an agent-usable package only after a real request has succeeded.
+
 ## MVP Scope
 
 - Native desktop app built with Rust + `eframe`/`egui`
@@ -14,6 +16,7 @@ FirstCall is a native local-first desktop tool for turning pasted `curl` command
 - Optional JSON Schema validation for JSON responses
 - SQLite persistence for attempts, recipes, and settings
 - Recipe rerun, curl copy, markdown export, and JSON export
+- Verified agent recipe package export from existing recipe JSON
 
 ## Build And Run
 
@@ -54,6 +57,12 @@ Run:
 cargo run
 ```
 
+CLI:
+
+```powershell
+cargo run --bin firstcall-cli -- version
+```
+
 Checks:
 
 ```powershell
@@ -68,6 +77,38 @@ Optional Windows `gnullvm` build:
 rustup target add x86_64-pc-windows-gnullvm
 cargo build --target x86_64-pc-windows-gnullvm
 ```
+
+## Agent Recipe Export
+
+FirstCall Agent Recipes exports a successful recipe into a portable agent tool package.
+
+**Verified API tool recipes for AI agents.**
+
+The package includes:
+
+- `recipe.yaml`
+- `skill.md`
+- `policy.json`
+- `verified.lock.json`
+- `mcp-server/` with a basic TypeScript MCP server template
+
+Raw secrets are never exported. Secret values are represented as environment variable references such as `FIRSTCALL_BEARER_TOKEN` or `FIRSTCALL_API_KEY`. Recipes are exportable only after a successful execution, represented by `last_success_at` and `last_success_status` in the exported recipe JSON.
+
+Explain an existing exported recipe JSON:
+
+```powershell
+cargo run --bin firstcall-cli -- explain --recipe-json ./recipe.json
+```
+
+Package a verified recipe:
+
+```powershell
+cargo run --bin firstcall-cli -- package `
+  --recipe-json ./recipe.json `
+  --out ./dist/my-agent-tool
+```
+
+The generated MCP server is a template artifact. Rust tests do not run `npm install`, `npm build`, or TypeScript compilation.
 
 ## CI
 
@@ -112,4 +153,5 @@ Each runner executes:
 - `src/exec/*`: request execution, classification, validation, redaction
 - `src/store/*`: SQLite migrations/repos and secret storage abstraction
 - `src/export/*`: curl, markdown, and JSON recipe export
+- `src/export/agent_*`, `src/export/policy.rs`, `src/export/skill.rs`, `src/export/mcp_ts.rs`: verified agent recipe package export
 - `fixtures/*`: sample manual test inputs
