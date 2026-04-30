@@ -1,5 +1,7 @@
 # FirstCall
 
+[![CI](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/ci.yml)
+
 FirstCall is a native local-first desktop tool for turning pasted `curl` commands, prose API docs, or OpenAPI snippets into one executable HTTP request. It helps fill runtime values, execute the call, classify the outcome, persist redacted attempts locally, and promote successful attempts into reusable recipes.
 
 FirstCall Agent Recipes adds a second surface to that workflow: **Verified API tool recipes for AI agents.** A recipe becomes an agent-usable package only after a real request has succeeded.
