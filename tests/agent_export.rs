@@ -227,10 +227,73 @@ fn generated_server_template_has_stricter_types_and_header_defaulting() {
     export_agent_package(&recipe, out.path()).expect("export");
     let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
 
+    assert!(server.contains("server.registerTool"));
     assert!(server.contains("type ToolArgs"));
     assert!(server.contains("Record<string, string>"));
     assert!(server.contains("RequestInit"));
     assert!(server.contains("setDefaultHeader"));
+    assert!(server.contains("const inputSchema = z.object(inputShape);"));
+}
+
+#[test]
+fn generated_mcp_server_contains_structured_output_markers() {
+    let recipe = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+
+    assert!(server.contains("structuredContent"));
+    assert!(server.contains("outputSchema"));
+    assert!(server.contains("body_preview"));
+    assert!(server.contains("redactResponsePreview"));
+}
+
+#[test]
+fn generated_mcp_server_contains_tool_annotations() {
+    let recipe = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+
+    assert!(server.contains("TOOL_ANNOTATIONS"));
+    assert!(server.contains("readOnlyHint"));
+    assert!(server.contains("destructiveHint"));
+    assert!(server.contains("openWorldHint"));
+}
+
+#[test]
+fn get_recipe_annotations_are_read_only() {
+    let recipe = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+
+    assert!(server.contains("\"readOnlyHint\": true"));
+    assert!(server.contains("\"destructiveHint\": false"));
+    assert!(server.contains("\"idempotentHint\": true"));
+    assert!(server.contains("\"openWorldHint\": true"));
+}
+
+#[test]
+fn destructive_method_annotations_are_destructive() {
+    let recipe = fake_recipe("DELETE", "https://api.example.com/users/{{user_id}}");
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+
+    assert!(server.contains("\"readOnlyHint\": false"));
+    assert!(server.contains("\"destructiveHint\": true"));
+}
+
+#[test]
+fn destructive_post_path_annotations_are_destructive() {
+    let recipe = fake_recipe("POST", "https://api.example.com/refund/{{user_id}}");
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+
+    assert!(server.contains("\"readOnlyHint\": false"));
+    assert!(server.contains("\"destructiveHint\": true"));
 }
 
 #[test]

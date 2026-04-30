@@ -457,11 +457,19 @@ fn validate_mcp_server(root: &Path, report: &mut PackageValidationReport) {
     for marker in [
         "McpServer",
         "StdioServerTransport",
-        "server.tool",
+        "server.registerTool",
         "ToolArgs",
         "RequestInit",
         "setDefaultHeader",
         "applyAuth",
+        "structuredContent",
+        "outputSchema",
+        "body_preview",
+        "redactResponsePreview",
+        "TOOL_ANNOTATIONS",
+        "readOnlyHint",
+        "destructiveHint",
+        "openWorldHint",
     ] {
         if text.contains(marker) {
             report.pass(format!("mcp-server/src/server.ts contains {marker}"));

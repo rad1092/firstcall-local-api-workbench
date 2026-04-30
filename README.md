@@ -93,7 +93,7 @@ The package includes:
 - `policy.json`
 - `verified.lock.json`
 - `package.manifest.json`
-- `mcp-server/` with a basic TypeScript MCP server template
+- `mcp-server/` with a TypeScript MCP server template
 
 Raw secrets are never exported. Secret values are represented as environment variable references such as `FIRSTCALL_BEARER_TOKEN` or `FIRSTCALL_API_KEY`. Recipes are exportable only after a successful execution, represented by `last_success_at` and a 2xx `last_success_status` in the exported recipe JSON.
 
@@ -167,7 +167,7 @@ dist/sample-agent-tool/
 
 This packages an already-verified recipe JSON. It does not execute an HTTP request, does not verify npm or TypeScript compilation, and does not export raw secrets.
 
-The generated MCP server is a template artifact. Rust tests do not run live HTTP verification, `npm install`, `npm build`, or TypeScript compilation.
+The generated MCP server is a template artifact. It returns `structuredContent` in addition to text content, declares an `outputSchema` for `status`, `ok`, and `body_preview`, and includes advisory tool annotations such as `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`. These annotations are hints only; they are not security controls. Rust tests do not run live HTTP verification, `npm install`, `npm build`, TypeScript compilation, Node, MCP Inspector, or the generated MCP runtime.
 
 ## Inspect generated package
 
@@ -192,7 +192,7 @@ Run static validation on the generated package:
 cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool
 ```
 
-`package.manifest.json` records SHA-256 hashes for generated package files. `validate-package` checks package structure, schema metadata, lock metadata, policy shape, MCP template markers, obvious secret leaks, and manifest hashes when the manifest is present. Missing `package.manifest.json` currently warns instead of failing for backward compatibility.
+`package.manifest.json` records SHA-256 hashes for generated package files. `validate-package` checks package structure, schema metadata, lock metadata, policy shape, MCP template markers including `structuredContent`, `outputSchema`, and tool annotations, obvious secret leaks, and manifest hashes when the manifest is present. Missing `package.manifest.json` currently warns instead of failing for backward compatibility.
 
 `validate-package` is static-only: it does not execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, execute the generated MCP server, import recipes, or modify files. The generated files should not export raw secrets.
 

@@ -44,6 +44,12 @@ fn validate_package_fixture_success() {
             .iter()
             .any(|check| check.contains("manifest hash matches"))
     );
+    assert!(
+        report
+            .checks_passed
+            .iter()
+            .any(|check| check.contains("structuredContent"))
+    );
 }
 
 #[test]
@@ -272,6 +278,24 @@ fn validate_package_raw_secret_fails_without_echoing_secret() {
     let errors = report.errors.join("\n");
     assert!(!report.is_valid());
     assert!(errors.contains("raw secret") || errors.contains("secret marker"));
+    assert!(!errors.contains(RAW_SECRET));
+}
+
+#[test]
+fn validate_package_missing_structured_output_marker_fails() {
+    let package = generate_package();
+    let server_path = package.path().join("mcp-server/src/server.ts");
+    let server = fs::read_to_string(&server_path).expect("read server");
+    fs::write(
+        &server_path,
+        server.replace("structuredContent", "structured_content_removed"),
+    )
+    .expect("tamper server");
+
+    let report = validate_agent_package_dir(package.path());
+    let errors = report.errors.join("\n");
+    assert!(!report.is_valid());
+    assert!(errors.contains("missing structuredContent"));
     assert!(!errors.contains(RAW_SECRET));
 }
 
