@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use firstcall::export::agent_package::{
     export_agent_package, is_agent_export_eligible, sanitized_agent_url_template,
 };
+use firstcall::export::package_validation::{PackageValidationReport, validate_agent_package_dir};
 use firstcall::export::verified_lock::recipe_to_verified_lock_json;
 use firstcall::model::Recipe;
 use firstcall::verify::{VerifyOptions, VerifyReport, verify_recipe_with_process_env};
@@ -73,6 +74,16 @@ fn run() -> Result<()> {
                     print_verify_preflight_failure(&recipe, &error);
                     bail!("verification preflight failed");
                 }
+            }
+        }
+        "validate-package" => {
+            let package_dir = required_path_arg(&args[1..], "--dir")?;
+            let report = validate_agent_package_dir(&package_dir);
+            print_package_validation_report(&report);
+            if report.is_valid() {
+                Ok(())
+            } else {
+                bail!("package validation failed")
             }
         }
         _ => {
@@ -167,6 +178,33 @@ fn print_verify_preflight_failure(recipe: &Recipe, error: &anyhow::Error) {
     println!("Error: {error}");
 }
 
+fn print_package_validation_report(report: &PackageValidationReport) {
+    println!("Package: {}", report.package_dir.display());
+    println!(
+        "Status: {}",
+        if report.is_valid() {
+            "valid"
+        } else {
+            "invalid"
+        }
+    );
+    println!("Checks passed: {}", report.checks_passed.len());
+    println!("Warnings: {}", report.warnings.len());
+    println!("Errors: {}", report.errors.len());
+    if !report.warnings.is_empty() {
+        println!("Warnings:");
+        for warning in &report.warnings {
+            println!("- {warning}");
+        }
+    }
+    if !report.errors.is_empty() {
+        println!("Errors:");
+        for error in &report.errors {
+            println!("- {error}");
+        }
+    }
+}
+
 fn required_path_arg(args: &[String], flag: &str) -> Result<PathBuf> {
     args.windows(2)
         .find(|pair| pair[0] == flag)
@@ -190,6 +228,7 @@ fn print_help() {
   firstcall-cli version
   firstcall-cli explain --recipe-json PATH
   firstcall-cli package --recipe-json PATH --out DIR
-  firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]"
+  firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]
+  firstcall-cli validate-package --dir PATH"
     );
 }

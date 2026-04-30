@@ -169,7 +169,13 @@ Inspect these generated files:
 - `dist/sample-agent-tool/verified.lock.json`
 - `dist/sample-agent-tool/mcp-server/src/server.ts`
 
-This command does not execute HTTP, run npm, or compile TypeScript. The generated files should not export raw secrets.
+Run static validation on the generated package:
+
+```powershell
+cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool
+```
+
+`validate-package` checks package structure, schema metadata, lock metadata, policy shape, MCP template markers, and obvious secret leaks. It is static-only: it does not execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, execute the generated MCP server, import recipes, or modify files. The generated files should not export raw secrets.
 
 ## CI
 
