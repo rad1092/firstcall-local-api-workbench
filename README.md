@@ -1,6 +1,9 @@
 # FirstCall
 
 [![CI](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/ci.yml)
+[![Security audit](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/security.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org/)
 
 FirstCall is a native local-first desktop tool for turning pasted `curl` commands, prose API docs, or OpenAPI snippets into one executable HTTP request. It helps fill runtime values, execute the call, classify the outcome, persist redacted attempts locally, and promote successful attempts into reusable recipes.
 
