@@ -208,8 +208,8 @@ Each runner executes:
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test`
-- `cargo build`
+- `cargo test --locked`
+- `cargo build --locked`
 
 ## Storage And Secrets
 
