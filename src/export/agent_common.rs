@@ -154,43 +154,24 @@ pub(crate) fn sanitized_key_value(field: &KeyValueField) -> String {
     template_to_agent_slots(&field.value)
 }
 
-pub(crate) fn headers_map(recipe: &Recipe) -> BTreeMap<String, String> {
+pub(crate) fn non_auth_headers_map(recipe: &Recipe) -> BTreeMap<String, String> {
     let mut headers = BTreeMap::new();
     for header in &recipe.headers_template {
+        if is_auth_generated_header(&recipe.auth_style, &header.key) {
+            continue;
+        }
         headers.insert(header.key.clone(), sanitized_header_value(header));
-    }
-    match &recipe.auth_style {
-        AuthStyle::Bearer { header_name, .. } => {
-            headers.insert(
-                header_name.clone(),
-                format!("Bearer {}", env_ref("FIRSTCALL_BEARER_TOKEN")),
-            );
-        }
-        AuthStyle::Basic { .. } => {
-            headers.insert(
-                "Authorization".to_string(),
-                format!(
-                    "Basic {}:{}",
-                    env_ref("FIRSTCALL_USERNAME"),
-                    env_ref("FIRSTCALL_PASSWORD")
-                ),
-            );
-        }
-        AuthStyle::HeaderApiKey { header_name, .. } => {
-            headers.insert(header_name.clone(), env_ref("FIRSTCALL_API_KEY"));
-        }
-        AuthStyle::None | AuthStyle::QueryApiKey { .. } => {}
     }
     headers
 }
 
-pub(crate) fn query_map(recipe: &Recipe) -> BTreeMap<String, String> {
+pub(crate) fn non_auth_query_map(recipe: &Recipe) -> BTreeMap<String, String> {
     let mut query = BTreeMap::new();
     for item in &recipe.query_template {
+        if is_auth_generated_query_param(&recipe.auth_style, &item.key) {
+            continue;
+        }
         query.insert(item.key.clone(), sanitized_key_value(item));
-    }
-    if let AuthStyle::QueryApiKey { param_name, .. } = &recipe.auth_style {
-        query.insert(param_name.clone(), env_ref("FIRSTCALL_API_KEY"));
     }
     query
 }
@@ -269,8 +250,8 @@ pub(crate) fn safe_canonical_recipe(recipe: &Recipe) -> Value {
         "method": recipe.method.to_ascii_uppercase(),
         "url_template": sanitize_url_template_for_agent(&recipe.url_template),
         "auth_type": auth_type(&recipe.auth_style),
-        "headers": headers_map(recipe),
-        "query": query_map(recipe),
+        "headers": non_auth_headers_map(recipe),
+        "query": non_auth_query_map(recipe),
         "body_template": body_template_value(&recipe.body_template),
         "slots": export_slots(&recipe.slots),
         "last_success_at": recipe.last_success_at.map(|value| value.to_rfc3339()),
@@ -280,6 +261,14 @@ pub(crate) fn safe_canonical_recipe(recipe: &Recipe) -> Value {
 
 pub(crate) fn all_env_requirements(recipe: &Recipe) -> Vec<EnvRequirement> {
     let mut requirements = auth_env_requirements(&recipe.auth_style);
+    for item in url_query_env_requirements(&recipe.url_template) {
+        if !requirements
+            .iter()
+            .any(|existing| existing.name == item.name)
+        {
+            requirements.push(item);
+        }
+    }
     for header in &recipe.headers_template {
         if is_secret_key(&header.key) || header.value.contains(REDACTED) {
             let name = secret_env_for_key(&header.key, &header.value);
@@ -303,6 +292,48 @@ pub(crate) fn all_env_requirements(recipe: &Recipe) -> Vec<EnvRequirement> {
         }
     }
     requirements
+}
+
+fn url_query_env_requirements(url_template: &str) -> Vec<EnvRequirement> {
+    let normalized = template_to_agent_slots(url_template);
+    let (without_fragment, _) = normalized
+        .split_once('#')
+        .map_or((normalized.as_str(), None), |(before, after)| {
+            (before, Some(after))
+        });
+    let Some((_, query)) = without_fragment.split_once('?') else {
+        return Vec::new();
+    };
+
+    query
+        .split('&')
+        .filter_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            is_secret_key(key).then(|| EnvRequirement {
+                name: secret_env_for_key(key, value),
+                description: format!("Secret value for URL query parameter {key}"),
+            })
+        })
+        .collect()
+}
+
+fn is_auth_generated_header(auth: &AuthStyle, key: &str) -> bool {
+    match auth {
+        AuthStyle::Bearer { header_name, .. } => header_name.eq_ignore_ascii_case(key),
+        AuthStyle::Basic { .. } => key.eq_ignore_ascii_case("authorization"),
+        AuthStyle::HeaderApiKey { header_name, .. } => header_name.eq_ignore_ascii_case(key),
+        AuthStyle::None | AuthStyle::QueryApiKey { .. } => false,
+    }
+}
+
+fn is_auth_generated_query_param(auth: &AuthStyle, key: &str) -> bool {
+    match auth {
+        AuthStyle::QueryApiKey { param_name, .. } => param_name.eq_ignore_ascii_case(key),
+        AuthStyle::None
+        | AuthStyle::Bearer { .. }
+        | AuthStyle::Basic { .. }
+        | AuthStyle::HeaderApiKey { .. } => false,
+    }
 }
 
 fn sanitize_json_template(value: &Value) -> Value {

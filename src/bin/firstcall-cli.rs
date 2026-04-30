@@ -2,7 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use firstcall::export::agent_package::{export_agent_package, is_agent_export_eligible};
+use firstcall::export::agent_package::{
+    export_agent_package, is_agent_export_eligible, sanitized_agent_url_template,
+};
 use firstcall::model::Recipe;
 
 fn main() {
@@ -56,7 +58,7 @@ fn print_recipe_summary(recipe: &Recipe) {
     println!("Tagline: Verified API tool recipes for AI agents.");
     println!("Recipe: {}", recipe.name);
     println!("Method: {}", recipe.method);
-    println!("URL template: {}", recipe.url_template);
+    println!("URL template: {}", sanitized_agent_url_template(recipe));
     println!("Auth style: {}", recipe.auth_style.label());
     println!("Required slots:");
     let required_slots = recipe

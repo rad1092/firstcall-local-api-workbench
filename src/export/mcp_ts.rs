@@ -10,7 +10,7 @@ use crate::model::{AuthStyle, BodyTemplate, Recipe};
 
 use super::agent_common::{
     PRODUCT_LABEL, TAGLINE, all_env_requirements, auth_type, body_template_value, export_slots,
-    headers_map, query_map, recipe_slug, sanitize_url_template_for_agent,
+    non_auth_headers_map, non_auth_query_map, recipe_slug, sanitize_url_template_for_agent,
 };
 
 #[derive(Serialize)]
@@ -97,8 +97,8 @@ fn server_ts(recipe: &Recipe) -> Result<String> {
         header_api_key_env: header_api_key_env(&recipe.auth_style),
         query_api_key_param: query_api_key_param(&recipe.auth_style),
         query_api_key_env: query_api_key_env(&recipe.auth_style),
-        headers: headers_map(recipe),
-        query: query_map(recipe),
+        headers: non_auth_headers_map(recipe),
+        query: non_auth_query_map(recipe),
         body_kind: body_kind(&recipe.body_template).to_string(),
         body_template: body_template_value(&recipe.body_template),
     };

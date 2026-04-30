@@ -139,6 +139,24 @@ This packages an already-verified recipe JSON. It does not execute an HTTP reque
 
 The generated MCP server is a template artifact. Rust tests do not run `npm install`, `npm build`, or TypeScript compilation.
 
+## Inspect generated package
+
+Create a local sample package:
+
+```powershell
+cargo run --bin firstcall-cli -- package --recipe-json fixtures/verified-agent-recipe.json --out ./dist/sample-agent-tool
+```
+
+Inspect these generated files:
+
+- `dist/sample-agent-tool/recipe.yaml`
+- `dist/sample-agent-tool/skill.md`
+- `dist/sample-agent-tool/policy.json`
+- `dist/sample-agent-tool/verified.lock.json`
+- `dist/sample-agent-tool/mcp-server/src/server.ts`
+
+This command does not execute HTTP, run npm, or compile TypeScript. The generated files should not export raw secrets.
+
 ## CI
 
 GitHub Actions validates:

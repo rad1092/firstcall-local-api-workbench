@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::model::Recipe;
 
+use super::agent_common::sanitize_url_template_for_agent;
 use super::agent_yaml::recipe_to_agent_yaml;
 use super::mcp_ts::write_mcp_server_package;
 use super::policy::recipe_to_policy_json;
@@ -13,6 +14,10 @@ use super::verified_lock::recipe_to_verified_lock_json;
 
 pub fn is_agent_export_eligible(recipe: &Recipe) -> bool {
     recipe.last_success_at.is_some() && recipe.last_success_status.is_some()
+}
+
+pub fn sanitized_agent_url_template(recipe: &Recipe) -> String {
+    sanitize_url_template_for_agent(&recipe.url_template)
 }
 
 pub fn export_agent_package(recipe: &Recipe, out_dir: &Path) -> Result<()> {
