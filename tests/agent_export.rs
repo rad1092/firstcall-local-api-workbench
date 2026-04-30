@@ -36,6 +36,11 @@ fn verified_recipe_can_export_and_unverified_recipe_cannot() {
     missing_status.last_success_status = None;
     assert!(!is_agent_export_eligible(&missing_status));
     assert!(export_agent_package(&missing_status, out.path()).is_err());
+
+    let mut failed_status = fake_recipe("POST", "https://api.stripe.com/v1/customers");
+    failed_status.last_success_status = Some(500);
+    assert!(!is_agent_export_eligible(&failed_status));
+    assert!(export_agent_package(&failed_status, out.path()).is_err());
 }
 
 #[test]
@@ -62,6 +67,18 @@ fn verified_lock_marks_successful_recipe_verified() {
     assert_eq!(value["generator"], "firstcall");
     assert_eq!(value["last_success_status"], 200);
     assert!(value["request_fingerprint"].as_str().unwrap().len() >= 64);
+    assert!(!lock.contains(RAW_SECRET));
+}
+
+#[test]
+fn verified_lock_marks_non_2xx_recipe_unverified() {
+    let mut recipe = fake_recipe("POST", "https://api.stripe.com/v1/customers");
+    recipe.last_success_status = Some(500);
+    let lock = recipe_to_verified_lock_json(&recipe).expect("lock");
+    let value: Value = serde_json::from_str(&lock).expect("json");
+
+    assert_eq!(value["verified"], false);
+    assert_eq!(value["last_success_status"], 500);
     assert!(!lock.contains(RAW_SECRET));
 }
 
@@ -93,6 +110,7 @@ fn package_export_creates_expected_files_without_raw_secrets() {
         "verified.lock.json",
         "skill.md",
         "policy.json",
+        "package.manifest.json",
         "mcp-server/package.json",
         "mcp-server/tsconfig.json",
         "mcp-server/src/server.ts",
@@ -287,7 +305,38 @@ fn cli_package_fixture_creates_agent_package() {
 
     assert!(output.status.success());
     assert!(out.path().join("recipe.yaml").exists());
+    assert!(out.path().join("package.manifest.json").exists());
     assert!(out.path().join("mcp-server/src/server.ts").exists());
+}
+
+#[test]
+fn cli_package_rejects_non_2xx_verified_recipe_without_raw_secret() {
+    let mut recipe = fake_recipe("POST", "https://api.stripe.com/v1/customers");
+    recipe.last_success_status = Some(500);
+    let dir = tempdir().expect("tempdir");
+    let recipe_path = dir.path().join("recipe.json");
+    let out_dir = dir.path().join("out");
+    fs::write(
+        &recipe_path,
+        serde_json::to_string_pretty(&recipe).expect("recipe json"),
+    )
+    .expect("write recipe");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_firstcall-cli"))
+        .args(["package", "--recipe-json"])
+        .arg(&recipe_path)
+        .args(["--out"])
+        .arg(&out_dir)
+        .output()
+        .expect("run cli");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(!output.status.success());
+    assert!(!combined.contains(RAW_SECRET));
 }
 
 #[test]

@@ -15,6 +15,10 @@ pub(crate) const PRODUCT_LABEL: &str = "FirstCall Agent Recipes";
 pub(crate) const TAGLINE: &str = "Verified API tool recipes for AI agents.";
 pub(crate) const GENERATOR: &str = "firstcall";
 
+pub(crate) fn has_successful_verification(recipe: &Recipe) -> bool {
+    recipe.last_success_at.is_some() && matches!(recipe.last_success_status, Some(200..=299))
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ExportSlot {
     pub name: String,

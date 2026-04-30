@@ -92,9 +92,10 @@ The package includes:
 - `skill.md`
 - `policy.json`
 - `verified.lock.json`
+- `package.manifest.json`
 - `mcp-server/` with a basic TypeScript MCP server template
 
-Raw secrets are never exported. Secret values are represented as environment variable references such as `FIRSTCALL_BEARER_TOKEN` or `FIRSTCALL_API_KEY`. Recipes are exportable only after a successful execution, represented by `last_success_at` and `last_success_status` in the exported recipe JSON.
+Raw secrets are never exported. Secret values are represented as environment variable references such as `FIRSTCALL_BEARER_TOKEN` or `FIRSTCALL_API_KEY`. Recipes are exportable only after a successful execution, represented by `last_success_at` and a 2xx `last_success_status` in the exported recipe JSON.
 
 Explain an existing exported recipe JSON:
 
@@ -142,6 +143,7 @@ dist/sample-agent-tool/
   verified.lock.json
   skill.md
   policy.json
+  package.manifest.json
   mcp-server/
     package.json
     tsconfig.json
@@ -167,6 +169,7 @@ Inspect these generated files:
 - `dist/sample-agent-tool/skill.md`
 - `dist/sample-agent-tool/policy.json`
 - `dist/sample-agent-tool/verified.lock.json`
+- `dist/sample-agent-tool/package.manifest.json`
 - `dist/sample-agent-tool/mcp-server/src/server.ts`
 
 Run static validation on the generated package:
@@ -175,7 +178,9 @@ Run static validation on the generated package:
 cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool
 ```
 
-`validate-package` checks package structure, schema metadata, lock metadata, policy shape, MCP template markers, and obvious secret leaks. It is static-only: it does not execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, execute the generated MCP server, import recipes, or modify files. The generated files should not export raw secrets.
+`package.manifest.json` records SHA-256 hashes for generated package files. `validate-package` checks package structure, schema metadata, lock metadata, policy shape, MCP template markers, obvious secret leaks, and manifest hashes when the manifest is present. Missing `package.manifest.json` currently warns instead of failing for backward compatibility.
+
+`validate-package` is static-only: it does not execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, execute the generated MCP server, import recipes, or modify files. The generated files should not export raw secrets.
 
 ## CI
 

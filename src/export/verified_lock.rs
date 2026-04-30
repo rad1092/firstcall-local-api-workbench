@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::model::Recipe;
 
-use super::agent_common::{GENERATOR, safe_canonical_recipe};
+use super::agent_common::{GENERATOR, has_successful_verification, safe_canonical_recipe};
 
 #[derive(Serialize)]
 struct VerifiedLock {
@@ -24,7 +24,7 @@ pub fn recipe_to_verified_lock_json(recipe: &Recipe) -> Result<String> {
     let artifact = VerifiedLock {
         schema_version: 1,
         recipe_name: recipe.name.clone(),
-        verified: recipe.last_success_at.is_some() && recipe.last_success_status.is_some(),
+        verified: has_successful_verification(recipe),
         last_success_at: recipe
             .last_success_at
             .map(|value| value.to_rfc3339())

@@ -1,22 +1,13 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use chrono::DateTime;
 use regex::Regex;
 use serde_json::Value;
 
 use super::agent_common::{GENERATOR, looks_destructive_path};
-
-const REQUIRED_FILES: &[&str] = &[
-    "recipe.yaml",
-    "verified.lock.json",
-    "skill.md",
-    "policy.json",
-    "mcp-server/package.json",
-    "mcp-server/tsconfig.json",
-    "mcp-server/src/server.ts",
-    "mcp-server/README.md",
-];
+use super::package_manifest::{MANIFEST_FILE, MANIFESTED_FILES, sha256_file_hex};
 
 const REQUIRED_DIRS: &[&str] = &["mcp-server", "mcp-server/src"];
 
@@ -75,6 +66,7 @@ pub fn validate_agent_package_dir(path: &Path) -> PackageValidationReport {
     validate_mcp_server(path, &mut report);
     validate_package_json(path, &mut report);
     validate_tsconfig_json(path, &mut report);
+    validate_package_manifest(path, &mut report);
 
     report
 }
@@ -124,7 +116,7 @@ fn validate_required_layout(root: &Path, report: &mut PackageValidationReport) {
         }
     }
 
-    for relative in REQUIRED_FILES {
+    for relative in MANIFESTED_FILES {
         let path = root.join(relative);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -155,6 +147,7 @@ fn validate_extra_entries(root: &Path, report: &mut PackageValidationReport) {
             "verified.lock.json",
             "skill.md",
             "policy.json",
+            MANIFEST_FILE,
             "mcp-server",
         ],
         report,
@@ -230,6 +223,7 @@ fn validate_recipe_yaml(root: &Path, report: &mut PackageValidationReport) {
 
     validate_recipe_method(&value, report);
     validate_recipe_url_template(&value, report);
+    validate_recipe_verified(&value, report);
     validate_recipe_security(&value, report);
     validate_recipe_executable_redaction(&value, report);
     scan_structured_secretish_values(report, "recipe.yaml", &value);
@@ -268,6 +262,22 @@ fn validate_recipe_url_template(value: &Value, report: &mut PackageValidationRep
         report.error("recipe.yaml url_template contains percent-encoded placeholder");
     } else {
         report.pass("recipe.yaml url_template placeholders are readable");
+    }
+}
+
+fn validate_recipe_verified(value: &Value, report: &mut PackageValidationReport) {
+    let Some(verified) = value.get("verified").and_then(Value::as_object) else {
+        return;
+    };
+    match verified.get("last_success_at").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() && value != "unverified" => {
+            report.pass("recipe.yaml verified.last_success_at is present");
+        }
+        _ => report.error("recipe.yaml verified.last_success_at must be verified"),
+    }
+    match verified.get("last_success_status").and_then(Value::as_u64) {
+        Some(200..=299) => report.pass("recipe.yaml verified.last_success_status is successful"),
+        _ => report.error("recipe.yaml verified.last_success_status must be 200..=299"),
     }
 }
 
@@ -572,12 +582,161 @@ fn validate_tsconfig_json(root: &Path, report: &mut PackageValidationReport) {
     }
 }
 
+fn validate_package_manifest(root: &Path, report: &mut PackageValidationReport) {
+    let manifest_path = root.join(MANIFEST_FILE);
+    match fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            report.error(format!("{MANIFEST_FILE} must not be a symlink"));
+            return;
+        }
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(metadata) if metadata.is_dir() => {
+            report.error(format!("{MANIFEST_FILE} must be a regular file"));
+            return;
+        }
+        Ok(_) => {
+            report.error(format!("{MANIFEST_FILE} has unsupported file type"));
+            return;
+        }
+        Err(_) => {
+            report.warn(format!("{MANIFEST_FILE} missing; integrity check skipped"));
+            return;
+        }
+    }
+
+    let Some(value) = read_json(root, MANIFEST_FILE, report) else {
+        return;
+    };
+    report.pass(format!("{MANIFEST_FILE} parses as JSON"));
+    check_u64_field(report, &value, MANIFEST_FILE, "schema_version", 1);
+    check_string_field(report, &value, MANIFEST_FILE, "generator", Some(GENERATOR));
+    validate_manifest_generated_at(&value, report);
+    validate_manifest_files(root, &value, report);
+}
+
+fn validate_manifest_generated_at(value: &Value, report: &mut PackageValidationReport) {
+    match value.get("generated_at").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() && DateTime::parse_from_rfc3339(value).is_ok() => {
+            report.pass(format!("{MANIFEST_FILE} generated_at is RFC3339"));
+        }
+        Some(value) if !value.trim().is_empty() => {
+            report.error(format!("{MANIFEST_FILE} generated_at must be RFC3339"));
+        }
+        _ => report.error(format!("{MANIFEST_FILE} generated_at must be present")),
+    }
+}
+
+fn validate_manifest_files(root: &Path, value: &Value, report: &mut PackageValidationReport) {
+    let Some(files) = value.get("files").and_then(Value::as_array) else {
+        report.error(format!("{MANIFEST_FILE} files must be an array"));
+        return;
+    };
+    if files.is_empty() {
+        report.error(format!("{MANIFEST_FILE} files must not be empty"));
+        return;
+    }
+    report.pass(format!("{MANIFEST_FILE} files is non-empty"));
+
+    let mut entries = BTreeMap::<String, String>::new();
+    let mut duplicate_paths = BTreeSet::<String>::new();
+    for item in files {
+        let Some(object) = item.as_object() else {
+            report.error(format!("{MANIFEST_FILE} file entries must be objects"));
+            continue;
+        };
+        let Some(path) = object.get("path").and_then(Value::as_str) else {
+            report.error(format!("{MANIFEST_FILE} file entry path must be a string"));
+            continue;
+        };
+        let Some(sha256) = object.get("sha256").and_then(Value::as_str) else {
+            report.error(format!(
+                "{MANIFEST_FILE} file entry sha256 must be a string: {path}"
+            ));
+            continue;
+        };
+        if !is_safe_manifest_path(path) {
+            report.error(format!("manifest path is unsafe: {path}"));
+            continue;
+        }
+        if !is_sha256_hex(sha256) {
+            report.error(format!("manifest sha256 must be lowercase hex: {path}"));
+            continue;
+        }
+        if entries
+            .insert(path.to_string(), sha256.to_string())
+            .is_some()
+        {
+            duplicate_paths.insert(path.to_string());
+        }
+    }
+    for path in duplicate_paths {
+        report.error(format!("manifest duplicate path: {path}"));
+    }
+
+    for expected in MANIFESTED_FILES {
+        if entries.contains_key(*expected) {
+            report.pass(format!("manifest includes expected file: {expected}"));
+        } else {
+            report.error(format!("manifest missing expected file: {expected}"));
+        }
+    }
+
+    for (relative, expected_sha256) in entries {
+        validate_manifest_file_hash(root, &relative, &expected_sha256, report);
+    }
+}
+
+fn validate_manifest_file_hash(
+    root: &Path,
+    relative: &str,
+    expected_sha256: &str,
+    report: &mut PackageValidationReport,
+) {
+    let target = root.join(relative);
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            report.error(format!("manifest target is a symlink: {relative}"));
+            return;
+        }
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(metadata) if metadata.is_dir() => {
+            report.error(format!("manifest target is a directory: {relative}"));
+            return;
+        }
+        Ok(_) => {
+            report.error(format!("manifest target has unsupported type: {relative}"));
+            return;
+        }
+        Err(_) => {
+            report.error(format!("manifest target missing: {relative}"));
+            return;
+        }
+    }
+
+    let Ok(actual_sha256) = sha256_file_hex(&target) else {
+        report.error(format!("manifest target could not be read: {relative}"));
+        return;
+    };
+    if actual_sha256 == expected_sha256 {
+        if MANIFESTED_FILES.contains(&relative) {
+            report.pass(format!("manifest hash matches: {relative}"));
+        } else {
+            report.warn(format!("manifest includes unexpected file: {relative}"));
+        }
+    } else {
+        report.error(format!("manifest hash mismatch: {relative}"));
+    }
+}
+
 fn scan_expected_text_files(root: &Path, report: &mut PackageValidationReport) {
-    for relative in REQUIRED_FILES {
+    for relative in MANIFESTED_FILES {
         let Some(text) = read_expected_text(root, relative, report) else {
             continue;
         };
         scan_text_for_secrets(report, relative, &text);
+    }
+    if let Some(text) = read_expected_text(root, MANIFEST_FILE, report) {
+        scan_text_for_secrets(report, MANIFEST_FILE, &text);
     }
 }
 
@@ -813,6 +972,19 @@ fn value_contains_redacted(value: &Value) -> bool {
 fn contains_percent_encoded_placeholder(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("%24%7b") || lower.contains("%7d")
+}
+
+fn is_safe_manifest_path(path: &str) -> bool {
+    !path.trim().is_empty()
+        && path == path.trim()
+        && path != MANIFEST_FILE
+        && !path.contains('\\')
+        && !path.contains(':')
+        && !path.starts_with('/')
+        && !path.contains("//")
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
 fn is_sha256_hex(value: &str) -> bool {
