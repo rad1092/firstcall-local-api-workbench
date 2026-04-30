@@ -7,12 +7,15 @@ use serde_json::Value;
 use crate::model::{AuthStyle, Recipe};
 
 use super::agent_common::{
-    ExportSlot, TAGLINE, all_env_requirements, auth_type, body_template_value, export_slots,
-    non_auth_headers_map, non_auth_query_map, recipe_slug, sanitize_url_template_for_agent,
+    ExportSlot, GENERATOR, TAGLINE, all_env_requirements, auth_type, body_template_value,
+    export_slots, non_auth_headers_map, non_auth_query_map, recipe_slug,
+    sanitize_url_template_for_agent,
 };
 
 #[derive(Serialize)]
 struct AgentRecipeYaml {
+    schema_version: u8,
+    generator: String,
     name: String,
     description: String,
     method: String,
@@ -58,6 +61,8 @@ struct SecurityYaml {
 
 pub fn recipe_to_agent_yaml(recipe: &Recipe) -> Result<String> {
     let artifact = AgentRecipeYaml {
+        schema_version: 1,
+        generator: GENERATOR.to_string(),
         name: recipe_slug(&recipe.name),
         description: TAGLINE.to_string(),
         method: recipe.method.to_ascii_uppercase(),

@@ -7,3 +7,4 @@ pub mod parse;
 pub mod store;
 pub mod ui;
 pub mod util;
+pub mod verify;

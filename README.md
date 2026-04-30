@@ -108,6 +108,18 @@ cargo run --bin firstcall-cli -- package `
   --out ./dist/my-agent-tool
 ```
 
+Re-run a recipe locally to refresh verification metadata:
+
+```powershell
+$env:FIRSTCALL_BEARER_TOKEN = "..."
+cargo run --bin firstcall-cli -- verify `
+  --recipe-json ./recipe.json `
+  --out ./recipe.verified.json `
+  --lock-out ./verified.lock.json
+```
+
+`verify` executes the recipe from the local machine. Secrets must come from environment variables, and raw secret values are not written to the updated recipe or lock file. `POST`, `PUT`, `PATCH`, and `DELETE` require `--allow-mutating`.
+
 Try the local verified fixture:
 
 ```powershell
@@ -137,7 +149,7 @@ dist/sample-agent-tool/
 
 This packages an already-verified recipe JSON. It does not execute an HTTP request, does not verify npm or TypeScript compilation, and does not export raw secrets.
 
-The generated MCP server is a template artifact. Rust tests do not run `npm install`, `npm build`, or TypeScript compilation.
+The generated MCP server is a template artifact. Rust tests do not run live HTTP verification, `npm install`, `npm build`, or TypeScript compilation.
 
 ## Inspect generated package
 

@@ -43,6 +43,8 @@ fn yaml_export_contains_agent_fields_without_raw_secrets() {
     let recipe = fake_recipe("POST", "https://api.stripe.com/v1/customers");
     let yaml = recipe_to_agent_yaml(&recipe).expect("yaml");
 
+    assert!(yaml.contains("schema_version: 1"));
+    assert!(yaml.contains("generator: firstcall"));
     assert!(yaml.contains("method: POST"));
     assert!(yaml.contains("url_template: https://api.stripe.com/v1/customers"));
     assert!(yaml.contains("FIRSTCALL_BEARER_TOKEN"));
@@ -56,6 +58,8 @@ fn verified_lock_marks_successful_recipe_verified() {
     let value: Value = serde_json::from_str(&lock).expect("json");
 
     assert_eq!(value["verified"], true);
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["generator"], "firstcall");
     assert_eq!(value["last_success_status"], 200);
     assert!(value["request_fingerprint"].as_str().unwrap().len() >= 64);
     assert!(!lock.contains(RAW_SECRET));
