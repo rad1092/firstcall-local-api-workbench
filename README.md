@@ -123,6 +123,20 @@ cargo run --bin firstcall-cli -- verify `
 
 `verify` executes the recipe from the local machine. Secrets must come from environment variables, and raw secret values are not written to the updated recipe or lock file. `POST`, `PUT`, `PATCH`, and `DELETE` require `--allow-mutating`.
 
+Check whether a recipe is ready to verify without sending HTTP:
+
+```powershell
+cargo run --bin firstcall-cli -- verify --recipe-json ./recipe.json --dry-run
+```
+
+```powershell
+cargo run --bin firstcall-cli -- verify --recipe-json ./recipe.json --preflight
+```
+
+`verify --dry-run` and `verify --preflight` are aliases. They perform local static/runtime-input preflight only, do not execute HTTP, and do not write `--out` or `--lock-out` files. The report lists required environment variables by name with `set` or `missing` status only, never secret values. Mutating methods still require `--allow-mutating` to be ready for real verification.
+
+`verify --dry-run` checks whether a recipe is ready to execute. `validate-package` checks exported package structure and integrity.
+
 Try the local verified fixture:
 
 ```powershell

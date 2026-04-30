@@ -8,7 +8,10 @@ use firstcall::export::agent_package::{
 use firstcall::export::package_validation::{PackageValidationReport, validate_agent_package_dir};
 use firstcall::export::verified_lock::recipe_to_verified_lock_json;
 use firstcall::model::Recipe;
-use firstcall::verify::{VerifyOptions, VerifyReport, verify_recipe_with_process_env};
+use firstcall::verify::{
+    VerifyOptions, VerifyPreflightReport, VerifyReport, verify_recipe_preflight_with_process_env,
+    verify_recipe_with_process_env,
+};
 
 fn main() {
     if let Err(error) = run() {
@@ -47,7 +50,22 @@ fn run() -> Result<()> {
             let out_path = optional_path_arg(&args[1..], "--out");
             let lock_out_path = optional_path_arg(&args[1..], "--lock-out");
             let allow_mutating = has_flag(&args[1..], "--allow-mutating");
+            let dry_run = has_flag(&args[1..], "--dry-run") || has_flag(&args[1..], "--preflight");
+            if dry_run && (out_path.is_some() || lock_out_path.is_some()) {
+                bail!("dry-run/preflight cannot write output files");
+            }
             let recipe = read_recipe_json(&recipe_json)?;
+            if dry_run {
+                let report = verify_recipe_preflight_with_process_env(
+                    &recipe,
+                    VerifyOptions { allow_mutating },
+                );
+                print_verify_preflight_report(&report);
+                if report.ready() {
+                    return Ok(());
+                }
+                bail!("verification preflight failed");
+            }
             match verify_recipe_with_process_env(&recipe, VerifyOptions { allow_mutating }) {
                 Ok(report) => {
                     print_verify_summary(&report);
@@ -178,6 +196,61 @@ fn print_verify_preflight_failure(recipe: &Recipe, error: &anyhow::Error) {
     println!("Error: {error}");
 }
 
+fn print_verify_preflight_report(report: &VerifyPreflightReport) {
+    println!("Product: FirstCall Agent Recipes");
+    println!("Mode: dry-run");
+    println!("Recipe: {}", report.recipe_name);
+    println!("Method: {}", report.method);
+    println!("URL template: {}", report.sanitized_url_template);
+    println!("Auth style: {}", report.auth_style);
+    println!("Body kind: {}", report.body_kind);
+    println!("Mutating method: {}", yes_no(report.mutating_method));
+    println!("Allow mutating: {}", yes_no(report.allow_mutating));
+    println!("Would execute HTTP: {}", yes_no(report.would_execute_http));
+    println!(
+        "Preflight status: {}",
+        if report.ready() { "ready" } else { "blocked" }
+    );
+    println!("Required environment variables:");
+    if report.required_env.is_empty() {
+        println!("- none");
+    } else {
+        for item in &report.required_env {
+            println!("- {}: {}", item.name, item.status.label());
+        }
+    }
+    println!("Required slots:");
+    if report.required_slots.is_empty() {
+        println!("- none");
+    } else {
+        for slot in &report.required_slots {
+            println!(
+                "- {} ({}, {}): {}",
+                slot.name,
+                slot.location,
+                if slot.required {
+                    "required"
+                } else {
+                    "optional"
+                },
+                slot.source.label()
+            );
+        }
+    }
+    println!("Blockers:");
+    if report.blockers.is_empty() {
+        println!("- none");
+    } else {
+        for blocker in &report.blockers {
+            println!("- {blocker}");
+        }
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
 fn print_package_validation_report(report: &PackageValidationReport) {
     println!("Package: {}", report.package_dir.display());
     println!(
@@ -228,7 +301,7 @@ fn print_help() {
   firstcall-cli version
   firstcall-cli explain --recipe-json PATH
   firstcall-cli package --recipe-json PATH --out DIR
-  firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]
+  firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating] [--dry-run|--preflight]
   firstcall-cli validate-package --dir PATH"
     );
 }

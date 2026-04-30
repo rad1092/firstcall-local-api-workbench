@@ -27,9 +27,78 @@ pub struct VerifyReport {
     pub updated_recipe: Recipe,
 }
 
+#[derive(Clone, Debug)]
+pub struct VerifyPreflightReport {
+    pub recipe_name: String,
+    pub method: String,
+    pub sanitized_url_template: String,
+    pub auth_style: String,
+    pub body_kind: String,
+    pub mutating_method: bool,
+    pub allow_mutating: bool,
+    pub would_execute_http: bool,
+    pub required_env: Vec<PreflightEnv>,
+    pub required_slots: Vec<PreflightSlot>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreflightEnv {
+    pub name: String,
+    pub status: PreflightValueStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreflightValueStatus {
+    Set,
+    Missing,
+}
+
+impl PreflightValueStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Set => "set",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreflightSlot {
+    pub name: String,
+    pub location: String,
+    pub required: bool,
+    pub source: PreflightSlotSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreflightSlotSource {
+    Current,
+    Env,
+    Missing,
+    OptionalEmpty,
+}
+
+impl PreflightSlotSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Env => "env",
+            Self::Missing => "missing",
+            Self::OptionalEmpty => "optional-empty",
+        }
+    }
+}
+
 impl VerifyReport {
     pub fn success(&self) -> bool {
         self.outcome == Outcome::Success
+    }
+}
+
+impl VerifyPreflightReport {
+    pub fn ready(&self) -> bool {
+        self.blockers.is_empty()
     }
 }
 
@@ -38,6 +107,51 @@ pub fn verify_recipe_with_process_env(
     options: VerifyOptions,
 ) -> Result<VerifyReport> {
     verify_recipe_with_env(recipe, options, |name| std::env::var(name).ok())
+}
+
+pub fn verify_recipe_preflight_with_process_env(
+    recipe: &Recipe,
+    options: VerifyOptions,
+) -> VerifyPreflightReport {
+    verify_recipe_preflight_with_env(recipe, options, |name| std::env::var(name).ok())
+}
+
+pub fn verify_recipe_preflight_with_env<F>(
+    recipe: &Recipe,
+    options: VerifyOptions,
+    env: F,
+) -> VerifyPreflightReport
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut report = VerifyPreflightReport {
+        recipe_name: recipe.name.clone(),
+        method: recipe.method.to_ascii_uppercase(),
+        sanitized_url_template: sanitized_agent_url_template(recipe),
+        auth_style: recipe.auth_style.label().to_string(),
+        body_kind: body_kind_label(&recipe.body_template).to_string(),
+        mutating_method: is_mutating_method(&recipe.method),
+        allow_mutating: options.allow_mutating,
+        would_execute_http: false,
+        required_env: Vec::new(),
+        required_slots: Vec::new(),
+        blockers: Vec::new(),
+    };
+
+    if report.mutating_method && !options.allow_mutating {
+        report
+            .blockers
+            .push("mutating method requires --allow-mutating".to_string());
+    }
+
+    validate_url_template_for_preflight(recipe, &env, &mut report);
+    validate_auth_for_preflight(recipe, &env, &mut report);
+    validate_headers_for_preflight(recipe, &env, &mut report);
+    validate_query_template_for_preflight(recipe, &env, &mut report);
+    validate_body_for_preflight(recipe, &mut report);
+    validate_slots_for_preflight(recipe, &env, &mut report);
+
+    report
 }
 
 pub fn verify_recipe_with_env<F>(
@@ -148,6 +262,253 @@ fn report_from_result(recipe: &Recipe, result: ExecutionResult) -> VerifyReport 
         verified_at,
         updated_recipe,
     }
+}
+
+fn validate_url_template_for_preflight<F>(
+    recipe: &Recipe,
+    env: &F,
+    report: &mut VerifyPreflightReport,
+) where
+    F: Fn(&str) -> Option<String>,
+{
+    let (without_fragment, _) = recipe
+        .url_template
+        .split_once('#')
+        .map_or((recipe.url_template.as_str(), None), |(before, after)| {
+            (before, Some(after))
+        });
+    let Some(scheme_end) = without_fragment.find("://") else {
+        report
+            .blockers
+            .push("URL template must be absolute".to_string());
+        return;
+    };
+    let authority_start = scheme_end + 3;
+    let rest_start = without_fragment[authority_start..]
+        .find(['/', '?'])
+        .map(|index| authority_start + index)
+        .unwrap_or(without_fragment.len());
+    let base_url = &without_fragment[..rest_start];
+    if Url::parse(&format!("{base_url}/")).is_err() {
+        report
+            .blockers
+            .push("URL template must include a valid absolute base URL".to_string());
+        return;
+    }
+
+    let rest = &without_fragment[rest_start..];
+    let (path, query) = if rest.is_empty() {
+        ("/", None)
+    } else if let Some(query) = rest.strip_prefix('?') {
+        ("/", Some(query))
+    } else if let Some((path, query)) = rest.split_once('?') {
+        (path, Some(query))
+    } else {
+        (rest, None)
+    };
+
+    if is_redacted(path) {
+        report
+            .blockers
+            .push("URL path contains redacted values and cannot be verified".to_string());
+    }
+    if let Some(query) = query {
+        validate_url_query_for_preflight(query, env, report);
+    }
+}
+
+fn validate_url_query_for_preflight<F>(query: &str, env: &F, report: &mut VerifyPreflightReport)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    for part in query.split('&').filter(|part| !part.is_empty()) {
+        let (key, value) = part
+            .split_once('=')
+            .map_or((part, ""), |(key, value)| (key, value));
+        if is_secret_key(key) {
+            add_required_env(
+                report,
+                secret_env_name(key, value),
+                env_status(env, &secret_env_name(key, value)),
+            );
+        } else if is_redacted(value) {
+            report.blockers.push(format!(
+                "URL query parameter {key} contains redacted values and cannot be verified"
+            ));
+        }
+    }
+}
+
+fn validate_auth_for_preflight<F>(recipe: &Recipe, env: &F, report: &mut VerifyPreflightReport)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match &recipe.auth_style {
+        AuthStyle::None => {}
+        AuthStyle::Bearer { .. } => {
+            add_required_env(
+                report,
+                "FIRSTCALL_BEARER_TOKEN".to_string(),
+                env_status(env, "FIRSTCALL_BEARER_TOKEN"),
+            );
+        }
+        AuthStyle::Basic { .. } => {
+            add_required_env(
+                report,
+                "FIRSTCALL_USERNAME".to_string(),
+                env_status(env, "FIRSTCALL_USERNAME"),
+            );
+            add_required_env(
+                report,
+                "FIRSTCALL_PASSWORD".to_string(),
+                env_status(env, "FIRSTCALL_PASSWORD"),
+            );
+        }
+        AuthStyle::HeaderApiKey { .. } | AuthStyle::QueryApiKey { .. } => {
+            add_required_env(
+                report,
+                "FIRSTCALL_API_KEY".to_string(),
+                env_status(env, "FIRSTCALL_API_KEY"),
+            );
+        }
+    }
+}
+
+fn validate_headers_for_preflight<F>(recipe: &Recipe, env: &F, report: &mut VerifyPreflightReport)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    for header in &recipe.headers_template {
+        if is_auth_generated_header(&recipe.auth_style, &header.key) {
+            continue;
+        }
+        if is_secret_key(&header.key) {
+            let env_name = secret_env_name(&header.key, &header.value);
+            add_required_env(report, env_name.clone(), env_status(env, &env_name));
+        } else if is_redacted(&header.value) {
+            report.blockers.push(format!(
+                "header {} contains redacted values and cannot be verified",
+                header.key
+            ));
+        }
+    }
+}
+
+fn validate_query_template_for_preflight<F>(
+    recipe: &Recipe,
+    env: &F,
+    report: &mut VerifyPreflightReport,
+) where
+    F: Fn(&str) -> Option<String>,
+{
+    for item in &recipe.query_template {
+        if is_auth_generated_query_param(&recipe.auth_style, &item.key) {
+            continue;
+        }
+        if is_secret_key(&item.key) {
+            let env_name = secret_env_name(&item.key, &item.value);
+            add_required_env(report, env_name.clone(), env_status(env, &env_name));
+        } else if is_redacted(&item.value) {
+            report.blockers.push(format!(
+                "query parameter {} contains redacted values and cannot be verified",
+                item.key
+            ));
+        }
+    }
+}
+
+fn validate_body_for_preflight(recipe: &Recipe, report: &mut VerifyPreflightReport) {
+    if body_contains_redacted(&recipe.body_template) {
+        report
+            .blockers
+            .push("body template contains redacted values and cannot be verified".to_string());
+    }
+}
+
+fn validate_slots_for_preflight<F>(recipe: &Recipe, env: &F, report: &mut VerifyPreflightReport)
+where
+    F: Fn(&str) -> Option<String>,
+{
+    for slot in &recipe.slots {
+        if slot.location == SlotLocation::Auth {
+            continue;
+        }
+        let current = slot.current_value.as_deref().unwrap_or("").trim();
+        let can_use_current =
+            !current.is_empty() && !is_redacted(current) && !is_secret_key(&slot.name);
+        let source = if can_use_current {
+            PreflightSlotSource::Current
+        } else {
+            let env_name = slot_env_name(&slot.name);
+            match env_status(env, &env_name) {
+                PreflightValueStatus::Set => {
+                    if slot.required {
+                        add_required_env(report, env_name, PreflightValueStatus::Set);
+                    }
+                    PreflightSlotSource::Env
+                }
+                PreflightValueStatus::Missing if slot.required => {
+                    add_required_env(report, env_name.clone(), PreflightValueStatus::Missing);
+                    report.blockers.push(format!(
+                        "missing required slot value: {} (env {env_name})",
+                        slot.name
+                    ));
+                    PreflightSlotSource::Missing
+                }
+                PreflightValueStatus::Missing => PreflightSlotSource::OptionalEmpty,
+            }
+        };
+        report.required_slots.push(PreflightSlot {
+            name: slot.name.clone(),
+            location: slot.location.label().to_string(),
+            required: slot.required,
+            source,
+        });
+    }
+}
+
+fn add_required_env(
+    report: &mut VerifyPreflightReport,
+    name: String,
+    status: PreflightValueStatus,
+) {
+    if !report.required_env.iter().any(|item| item.name == name) {
+        report.required_env.push(PreflightEnv {
+            name: name.clone(),
+            status,
+        });
+    }
+    if status == PreflightValueStatus::Missing {
+        let message = format!("missing required environment variable: {name}");
+        if !report.blockers.iter().any(|item| item == &message) {
+            report.blockers.push(message);
+        }
+    }
+}
+
+fn env_status<F>(env: &F, name: &str) -> PreflightValueStatus
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if env(name).is_some_and(|value| !value.trim().is_empty()) {
+        PreflightValueStatus::Set
+    } else {
+        PreflightValueStatus::Missing
+    }
+}
+
+fn body_kind_label(body: &BodyTemplate) -> &'static str {
+    match body {
+        BodyTemplate::None => "none",
+        BodyTemplate::Json { .. } => "json",
+        BodyTemplate::Text { .. } => "text",
+        BodyTemplate::Form { .. } => "form",
+        BodyTemplate::Multipart { .. } => "multipart",
+    }
+}
+
+fn is_mutating_method(method: &str) -> bool {
+    !matches!(method.to_ascii_uppercase().as_str(), "GET" | "HEAD")
 }
 
 fn ensure_method_allowed(method: &str, allow_mutating: bool) -> Result<()> {
@@ -549,8 +910,8 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use super::{
-        prepare_draft_for_verify_with_env, redacted_recipe_for_verify_output, secret_env_name,
-        slot_env_name,
+        VerifyOptions, prepare_draft_for_verify_with_env, redacted_recipe_for_verify_output,
+        secret_env_name, slot_env_name, verify_recipe_preflight_with_env,
     };
     use crate::exec::redact::redact_draft_for_storage;
     use crate::model::{
@@ -591,6 +952,25 @@ mod tests {
         assert!(draft.query.iter().any(|item| item.key == "api_key"));
         assert!(!serialized_draft.contains(RAW_SECRET));
         assert!(!redacted_recipe.contains(RAW_SECRET));
+    }
+
+    #[test]
+    fn preflight_discards_env_values_from_report() {
+        let recipe = fake_recipe();
+        let mut env = BTreeMap::new();
+        env.insert("FIRSTCALL_BEARER_TOKEN".to_string(), RAW_SECRET.to_string());
+        env.insert("FIRSTCALL_API_KEY".to_string(), RAW_SECRET.to_string());
+        env.insert("FIRSTCALL_SLOT_USER_ID".to_string(), RAW_SECRET.to_string());
+
+        let report = verify_recipe_preflight_with_env(&recipe, VerifyOptions::default(), |name| {
+            env.get(name).cloned()
+        });
+        let debug = format!("{report:?}");
+        let blockers = report.blockers.join("\n");
+
+        assert!(report.ready(), "blockers: {:?}", report.blockers);
+        assert!(!debug.contains(RAW_SECRET));
+        assert!(!blockers.contains(RAW_SECRET));
     }
 
     fn fake_recipe() -> Recipe {
