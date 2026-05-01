@@ -5,10 +5,12 @@ use anyhow::{Context, Result, bail};
 use firstcall::export::agent_package::{
     export_agent_package, is_agent_export_eligible, sanitized_agent_url_template,
 };
+use firstcall::export::package_import::{PackageImportReport, import_agent_package_dir};
 use firstcall::export::package_inspect::{PackageInspectReport, inspect_agent_package_dir};
 use firstcall::export::package_validation::{PackageValidationReport, validate_agent_package_dir};
 use firstcall::export::verified_lock::recipe_to_verified_lock_json;
 use firstcall::model::Recipe;
+use firstcall::store::db::AppPaths;
 use firstcall::verify::{
     VerifyOptions, VerifyPreflightReport, VerifyReport, verify_recipe_preflight_with_process_env,
     verify_recipe_with_process_env,
@@ -113,6 +115,23 @@ fn run() -> Result<()> {
                 Ok(())
             } else {
                 bail!("package import readiness blocked")
+            }
+        }
+        "import-package" => {
+            let package_dir = required_path_arg(&args[1..], "--dir")?;
+            let data_dir = optional_path_arg(&args[1..], "--data-dir");
+            let config_dir = optional_path_arg(&args[1..], "--config-dir");
+            let paths = match (data_dir, config_dir) {
+                (Some(data_dir), Some(config_dir)) => AppPaths::from_root(&data_dir, &config_dir)?,
+                (None, None) => AppPaths::discover()?,
+                _ => bail!("--data-dir and --config-dir must be provided together"),
+            };
+            let report = import_agent_package_dir(&package_dir, &paths)?;
+            print_package_import_report(&report);
+            if report.imported() {
+                Ok(())
+            } else {
+                bail!("package import blocked")
             }
         }
         _ => {
@@ -335,6 +354,51 @@ fn print_package_inspect_report(report: &PackageInspectReport) {
     }
 }
 
+fn print_package_import_report(report: &PackageImportReport) {
+    println!("Product: FirstCall Agent Recipes");
+    println!("Mode: import-package");
+    println!("Package: {}", report.package_dir.display());
+    println!("Import status: {}", report.status_label());
+    println!(
+        "Imported recipe id: {}",
+        report
+            .imported_recipe_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string())
+    );
+    println!("Recipe: {}", report.recipe_name.as_deref().unwrap_or("n/a"));
+    println!("Method: {}", report.method.as_deref().unwrap_or("n/a"));
+    println!(
+        "URL template: {}",
+        report.safe_url_template.as_deref().unwrap_or("n/a")
+    );
+    println!("Preserved verified status: no");
+    println!("Requires local re-verification: yes");
+    println!("Secrets imported: no");
+    println!("Would execute HTTP: no");
+    println!("Generated MCP server source of truth: no");
+    println!(
+        "App storage modified: {}",
+        if report.imported() { "yes" } else { "no" }
+    );
+    println!(
+        "Validation status: {}",
+        report.inspect_report.validation_status()
+    );
+    println!(
+        "Import readiness: {}",
+        report.inspect_report.readiness_status()
+    );
+    println!("Import blockers:");
+    if report.blockers.is_empty() {
+        println!("- none");
+    } else {
+        for blocker in &report.blockers {
+            println!("- {blocker}");
+        }
+    }
+}
+
 fn required_path_arg(args: &[String], flag: &str) -> Result<PathBuf> {
     args.windows(2)
         .find(|pair| pair[0] == flag)
@@ -360,6 +424,7 @@ fn print_help() {
   firstcall-cli package --recipe-json PATH --out DIR
   firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating] [--dry-run|--preflight]
   firstcall-cli validate-package --dir PATH
-  firstcall-cli inspect-package --dir PATH"
+  firstcall-cli inspect-package --dir PATH
+  firstcall-cli import-package --dir PATH [--data-dir PATH --config-dir PATH]"
     );
 }

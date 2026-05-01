@@ -6,7 +6,7 @@ This document defines the exported FirstCall Agent Recipe package format and the
 
 FirstCall Agent Recipes packages are produced after a real local verification succeeds. The package format is local-first, redacted, environment-variable-backed, and intended to be useful to coding agents without becoming a cloud service or a marketplace format.
 
-Actual package import is intentionally out of scope. This document is a schema and design reference. `firstcall-cli inspect-package` can report import-readiness, but `firstcall-cli import-package`, recipe YAML import, and desktop UI import do not exist today.
+This document is a schema and design reference. `firstcall-cli inspect-package` can report import-readiness, and `firstcall-cli import-package` can import inspect-ready packages into local recipe storage. Recipe YAML import and desktop UI import do not exist today.
 
 ## Package Root Layout
 
@@ -431,9 +431,9 @@ Local loopback verification tests are allowed. External live HTTP tests are not 
 
 `firstcall-cli inspect-package --dir PATH` implements a static import-readiness report. It does not import packages, persist recipes, modify app storage, execute HTTP, or run generated MCP tooling.
 
-Actual import behavior remains design-only.
+Actual desktop UI import remains design-only. The CLI import flow is package-directory-based and only runs after inspect-readiness succeeds.
 
-Proposed decisions:
+Current CLI import and future desktop import decisions:
 
 - Import should be package-directory-based, not `recipe.yaml`-only.
 - Import should run `validate-package` first.
@@ -449,12 +449,13 @@ Proposed decisions:
 - Import should not run npm, TypeScript, Node, MCP Inspector, or generated MCP runtime.
 - Import should not modify files outside the intended local app storage path.
 - Import should provide a clear dry-run/readiness report before actual persistence.
+- `firstcall-cli import-package` imports into existing local SQLite recipe storage and clears verification metadata so the imported recipe needs local re-verification.
 
 ## Open Questions and Future Phases
 
 Phase 4B defines `firstcall-cli inspect-package --dir PATH` as an import-readiness CLI surface. It reports whether a package is import-ready without modifying app storage.
 
-Phase 4C should implement actual package import only after schema, validation, and dry-run behavior are stable.
+Phase 4C adds `firstcall-cli import-package` for CLI-only package import after schema, validation, and inspect-readiness behavior are stable.
 
 Desktop UI integration should wait until the CLI contract is stable.
 

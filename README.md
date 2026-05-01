@@ -207,6 +207,20 @@ cargo run --bin firstcall-cli -- inspect-package --dir ./dist/sample-agent-tool
 
 `inspect-package` runs `validate-package` and then checks import-readiness conditions such as manifest presence, recipe/policy agreement, and verified lock metadata. It does not import recipes, modify files, modify app storage, execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, or execute the generated MCP server. Missing `package.manifest.json` blocks inspect-readiness even though `validate-package` still warns for backward compatibility. Imported recipes will require local re-verification in a future real import flow.
 
+Import an inspect-ready package into local FirstCall recipe storage:
+
+```powershell
+cargo run --bin firstcall-cli -- import-package --dir ./dist/sample-agent-tool
+```
+
+For tests or controlled local imports, storage can be overridden explicitly:
+
+```powershell
+cargo run --bin firstcall-cli -- import-package --dir ./dist/sample-agent-tool --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config
+```
+
+`import-package` runs inspect-readiness first, writes one recipe into the existing local SQLite recipe storage, and marks the imported recipe as needing local re-verification. It does not preserve verified status, import raw secrets, execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, execute generated MCP runtime, or use generated `mcp-server/` files as the source of truth.
+
 ## CI
 
 GitHub Actions validates:
