@@ -49,7 +49,7 @@ Required top-level fields:
 - `name`: stable tool/recipe name.
 - `description`: short recipe description.
 - `method`: HTTP method. It should be uppercase, for example `GET` or `POST`.
-- `url_template`: absolute URL template with readable placeholders such as `{{user_id}}`.
+- `url_template`: absolute URL template with readable exported placeholders such as `${user_id}`.
 - `auth`: auth metadata.
 - `headers`: non-auth static or templated headers.
 - `query`: non-auth static or templated query parameters.
@@ -65,8 +65,8 @@ schema_version: 1
 generator: firstcall
 name: example_get_user
 description: "Verified API tool recipes for AI agents."
-method: GET
-url_template: "https://api.example.com/users/{{user_id}}"
+method: POST
+url_template: "https://api.example.com/users/${user_id}"
 auth:
   type: bearer
   env: FIRSTCALL_BEARER_TOKEN
@@ -74,8 +74,9 @@ auth:
 headers:
   Accept: application/json
 query:
-  include: "{{include}}"
-body_template: null
+  include: "${include}"
+body_template:
+  email: "${email}"
 slots:
   - name: user_id
     location: path
@@ -83,6 +84,9 @@ slots:
   - name: include
     location: query
     required: false
+  - name: email
+    location: body
+    required: true
 verified:
   last_success_at: "2026-04-29T00:00:00Z"
   last_success_status: 200
@@ -94,10 +98,28 @@ security:
     - FIRSTCALL_BEARER_TOKEN
 ```
 
+## Placeholder Syntax
+
+FirstCall currently has two related placeholder forms:
+
+- Source recipe and runtime templates may use double-brace placeholders such as `{{slot_name}}` or `{{user_id}}`.
+- Exported agent package artifacts currently normalize runtime slot placeholders into `${slot_name}` form, such as `${user_id}`.
+
+For example, a source recipe URL of `https://api.example.com/users/{{user_id}}` is exported in `recipe.yaml`, `skill.md`, and the generated MCP template as `https://api.example.com/users/${user_id}`.
+
+Environment variable names are not runtime slot placeholders. `FIRSTCALL_API_KEY` is an environment variable name. `${FIRSTCALL_API_KEY}` is an env-backed reference in a templated value field. `auth.env: FIRSTCALL_BEARER_TOKEN` is metadata naming an environment variable, not a slot placeholder.
+
+Secret environment references may appear as plain environment variable names or as env-backed template references depending on the field:
+
+- Auth metadata fields such as `auth.env`, `username_env`, and `password_env` use plain names like `FIRSTCALL_BEARER_TOKEN`.
+- Header, query, URL query, or body template values may use env-backed references such as `${FIRSTCALL_API_KEY}`.
+
+The important invariant is readability: runtime placeholders and env-backed references must remain readable and must not be percent-encoded as `%24%7B...%7D`.
+
 URL and template rules:
 
 - `url_template` must be absolute enough for local verification and generated tool execution.
-- Placeholders must remain readable. Use a form such as `{{slot_name}}`; do not percent-encode placeholders.
+- Exported agent package placeholders should remain readable, for example `${slot_name}`.
 - `url_template` must not contain executable `<redacted>` values.
 - Secret-looking URL query values must be represented by environment-variable references, not raw values.
 
@@ -194,7 +216,7 @@ Compact example:
   "schema_version": 1,
   "allowed_methods": ["GET"],
   "allowed_hosts": ["api.example.com"],
-  "allowed_paths": ["/users/{{user_id}}"],
+  "allowed_paths": ["/users/slot"],
   "blocked_headers": [],
   "secret_headers": [
     "Authorization",
@@ -227,9 +249,11 @@ Rules:
 - `DELETE`, `PUT`, and `PATCH` require confirmation under current policy rules.
 - `POST` requires confirmation when the path appears destructive, for example delete, remove, cancel, refund, or archive style paths.
 - Non-destructive `POST` may remain confirmation-free under current policy rules.
+- Current `policy.json` generation parses the source recipe URL with placeholder-safe replacements. Runtime placeholders such as `{{user_id}}` or `${user_id}` are replaced with the parse-safe literal `slot` for `allowed_paths`, so a recipe path like `/users/{{user_id}}` currently becomes `/users/slot`.
 - `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, and `X-API-Key` are treated as secret headers.
 - Common secret query keys include `api_key`, `token`, `secret`, `access_token`, and `refresh_token`.
 - Common response redaction keys include `token`, `secret`, `password`, `api_key`, `access_token`, and `refresh_token`.
+- Future import-readiness logic may need stricter reconciliation between `recipe.yaml` and `policy.json` before persistence, because `recipe.yaml` preserves exported runtime placeholders while current `policy.json` stores parse-safe paths.
 
 ## package.manifest.json Schema
 
