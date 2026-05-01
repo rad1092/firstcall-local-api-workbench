@@ -5,6 +5,7 @@ pub mod curl;
 pub mod json;
 pub mod markdown;
 pub mod mcp_ts;
+pub mod package_inspect;
 pub mod package_manifest;
 pub mod package_validation;
 pub mod policy;

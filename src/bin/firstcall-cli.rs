@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail};
 use firstcall::export::agent_package::{
     export_agent_package, is_agent_export_eligible, sanitized_agent_url_template,
 };
+use firstcall::export::package_inspect::{PackageInspectReport, inspect_agent_package_dir};
 use firstcall::export::package_validation::{PackageValidationReport, validate_agent_package_dir};
 use firstcall::export::verified_lock::recipe_to_verified_lock_json;
 use firstcall::model::Recipe;
@@ -102,6 +103,16 @@ fn run() -> Result<()> {
                 Ok(())
             } else {
                 bail!("package validation failed")
+            }
+        }
+        "inspect-package" => {
+            let package_dir = required_path_arg(&args[1..], "--dir")?;
+            let report = inspect_agent_package_dir(&package_dir);
+            print_package_inspect_report(&report);
+            if report.is_ready() {
+                Ok(())
+            } else {
+                bail!("package import readiness blocked")
             }
         }
         _ => {
@@ -278,6 +289,52 @@ fn print_package_validation_report(report: &PackageValidationReport) {
     }
 }
 
+fn print_package_inspect_report(report: &PackageInspectReport) {
+    println!("Product: FirstCall Agent Recipes");
+    println!("Mode: inspect-package");
+    println!("Package: {}", report.package_dir.display());
+    println!("Validation status: {}", report.validation_status());
+    println!("Import readiness: {}", report.readiness_status());
+    println!("Manifest: {}", report.manifest_status());
+    println!("Legacy package: {}", yes_no(report.legacy_package()));
+    println!("Would import: no");
+    println!("Would execute HTTP: no");
+    println!("Would write files: no");
+    println!("Would modify app storage: no");
+    println!("Requires local re-verification: yes");
+    println!("Raw secrets imported: no");
+    println!("Generated MCP server source of truth: no");
+    println!("Request fingerprint recomputation: deferred");
+    println!(
+        "Validation checks passed: {}",
+        report.validation.checks_passed.len()
+    );
+    println!("Validation warnings: {}", report.validation.warnings.len());
+    if report.validation.warnings.is_empty() {
+        println!("- none");
+    } else {
+        for warning in &report.validation.warnings {
+            println!("- {warning}");
+        }
+    }
+    println!("Validation errors: {}", report.validation.errors.len());
+    if report.validation.errors.is_empty() {
+        println!("- none");
+    } else {
+        for error in &report.validation.errors {
+            println!("- {error}");
+        }
+    }
+    println!("Import-readiness blockers:");
+    if report.blockers.is_empty() {
+        println!("- none");
+    } else {
+        for blocker in &report.blockers {
+            println!("- {blocker}");
+        }
+    }
+}
+
 fn required_path_arg(args: &[String], flag: &str) -> Result<PathBuf> {
     args.windows(2)
         .find(|pair| pair[0] == flag)
@@ -302,6 +359,7 @@ fn print_help() {
   firstcall-cli explain --recipe-json PATH
   firstcall-cli package --recipe-json PATH --out DIR
   firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating] [--dry-run|--preflight]
-  firstcall-cli validate-package --dir PATH"
+  firstcall-cli validate-package --dir PATH
+  firstcall-cli inspect-package --dir PATH"
     );
 }
