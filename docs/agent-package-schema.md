@@ -6,7 +6,7 @@ This document defines the exported FirstCall Agent Recipe package format and the
 
 FirstCall Agent Recipes packages are produced after a real local verification succeeds. The package format is local-first, redacted, environment-variable-backed, and intended to be useful to coding agents without becoming a cloud service or a marketplace format.
 
-Actual package import is intentionally out of scope for Phase 4A. This document is a schema and design reference only. It does not mean `firstcall-cli import-package`, recipe YAML import, or desktop UI import exists today.
+Actual package import is intentionally out of scope. This document is a schema and design reference. `firstcall-cli inspect-package` can report import-readiness, but `firstcall-cli import-package`, recipe YAML import, and desktop UI import do not exist today.
 
 ## Package Root Layout
 
@@ -427,9 +427,11 @@ Verification is local. The user supplies secrets through environment variables. 
 
 Local loopback verification tests are allowed. External live HTTP tests are not required for Rust tests.
 
-## Proposed Import-Readiness Policy
+## Import-Readiness Policy
 
-This section is design only. It is not implemented in Phase 4A.
+`firstcall-cli inspect-package --dir PATH` implements a static import-readiness report. It does not import packages, persist recipes, modify app storage, execute HTTP, or run generated MCP tooling.
+
+Actual import behavior remains design-only.
 
 Proposed decisions:
 
@@ -450,7 +452,7 @@ Proposed decisions:
 
 ## Open Questions and Future Phases
 
-Phase 4B should define an `inspect-package` or import dry-run/preflight CLI surface. It should report whether a package is import-ready without modifying app storage.
+Phase 4B defines `firstcall-cli inspect-package --dir PATH` as an import-readiness CLI surface. It reports whether a package is import-ready without modifying app storage.
 
 Phase 4C should implement actual package import only after schema, validation, and dry-run behavior are stable.
 

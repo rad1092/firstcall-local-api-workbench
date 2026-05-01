@@ -199,6 +199,14 @@ cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool
 
 `validate-package` is static-only: it does not execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, execute the generated MCP server, import recipes, or modify files. The generated files should not export raw secrets.
 
+Inspect import-readiness without importing anything:
+
+```powershell
+cargo run --bin firstcall-cli -- inspect-package --dir ./dist/sample-agent-tool
+```
+
+`inspect-package` runs `validate-package` and then checks import-readiness conditions such as manifest presence, recipe/policy agreement, and verified lock metadata. It does not import recipes, modify files, modify app storage, execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, or execute the generated MCP server. Missing `package.manifest.json` blocks inspect-readiness even though `validate-package` still warns for backward compatibility. Imported recipes will require local re-verification in a future real import flow.
+
 ## CI
 
 GitHub Actions validates:

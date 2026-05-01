@@ -58,8 +58,21 @@ fn cli_inspect_package_prints_static_safety_fields() {
     assert!(combined.contains("Import readiness: ready"));
     assert!(combined.contains("Would import: no"));
     assert!(combined.contains("Would execute HTTP: no"));
+    assert!(combined.contains("Would write files: no"));
     assert!(combined.contains("Would modify app storage: no"));
     assert!(combined.contains("Requires local re-verification: yes"));
+    assert!(combined.contains("Raw secrets imported: no"));
+    assert!(combined.contains("Generated MCP server source of truth: no"));
+    assert!(combined.contains("Request fingerprint recomputation: deferred"));
+}
+
+#[test]
+fn cli_help_includes_inspect_package_usage() {
+    let output = inspect_command().output().expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains("firstcall-cli inspect-package --dir PATH"));
 }
 
 #[test]
@@ -133,6 +146,43 @@ fn inspect_package_unverified_or_non_2xx_lock_blocks() {
             .iter()
             .any(|blocker| blocker.contains("verified.lock.json"))
     );
+}
+
+#[test]
+fn inspect_package_invalid_request_fingerprint_blocks() {
+    let package = generate_package();
+    edit_json_file(package.path(), "verified.lock.json", |lock| {
+        lock["request_fingerprint"] = json!("not-a-sha");
+    });
+
+    let report = inspect_agent_package_dir(package.path());
+
+    assert!(!report.is_ready());
+    assert!(
+        report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("request_fingerprint"))
+    );
+}
+
+#[test]
+fn cli_inspect_package_missing_manifest_reports_legacy_blocked() {
+    let package = generate_package();
+    fs::remove_file(package.path().join("package.manifest.json")).expect("remove manifest");
+
+    let output = inspect_command()
+        .args(["inspect-package", "--dir"])
+        .arg(package.path())
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains("Manifest: missing"));
+    assert!(combined.contains("Legacy package: yes"));
+    assert!(combined.contains("Import readiness: blocked"));
+    assert!(!combined.contains(RAW_SECRET));
 }
 
 #[test]
