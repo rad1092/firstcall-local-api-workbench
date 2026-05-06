@@ -75,6 +75,56 @@ fn cli_import_package_imports_recipe_into_temp_sqlite() {
 }
 
 #[test]
+fn cli_import_package_json_imports_recipe_into_temp_sqlite() {
+    let package = generate_package();
+    let storage = tempdir().expect("storage tempdir");
+    let data_dir = storage.path().join("data");
+    let config_dir = storage.path().join("config");
+
+    let output = import_command()
+        .args(["import-package", "--dir"])
+        .arg(package.path())
+        .args(["--data-dir"])
+        .arg(&data_dir)
+        .args(["--config-dir"])
+        .arg(&config_dir)
+        .args(["--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(output.status.success(), "{}", combined_output(&output));
+    assert_eq!(report["product"], "FirstCall Agent Recipes");
+    assert_eq!(report["mode"], "import-package");
+    assert_eq!(report["import_status"], "imported");
+    assert!(report["imported_recipe_id"].as_i64().is_some());
+    assert_eq!(report["app_storage_modified"], true);
+    assert_eq!(report["requires_local_re_verification"], true);
+    assert_eq!(report["secrets_imported"], false);
+    assert_eq!(report["would_execute_http"], false);
+    assert_eq!(report["generated_mcp_server_source_of_truth"], false);
+    assert_eq!(report["import_readiness"], "ready");
+    assert!(
+        report["url_template"]
+            .as_str()
+            .expect("url template")
+            .contains("${FIRSTCALL_API_KEY}")
+    );
+    assert!(
+        !report["url_template"]
+            .as_str()
+            .expect("url template")
+            .contains("{{FIRSTCALL_API_KEY}}")
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+
+    let imported = single_imported_recipe(&data_dir, &config_dir);
+    assert_eq!(imported.last_success_at, None);
+    assert_eq!(imported.last_success_status, None);
+}
+
+#[test]
 fn cli_help_includes_import_package_usage() {
     let output = import_command().output().expect("run cli");
     let combined = combined_output(&output);
@@ -138,6 +188,43 @@ fn cli_missing_manifest_blocks_without_sqlite_write() {
     assert!(combined.contains("package import blocked"));
     assert!(!combined.contains(RAW_SECRET));
     assert!(!paths.db_path.exists());
+}
+
+#[test]
+fn cli_import_package_json_missing_manifest_blocks_without_sqlite_write() {
+    let package = generate_package();
+    fs::remove_file(package.path().join("package.manifest.json")).expect("remove manifest");
+    let storage = tempdir().expect("storage tempdir");
+    let data_dir = storage.path().join("data");
+    let config_dir = storage.path().join("config");
+    let paths = AppPaths::from_root(&data_dir, &config_dir).expect("paths");
+
+    let output = import_command()
+        .args(["import-package", "--dir"])
+        .arg(package.path())
+        .args(["--data-dir"])
+        .arg(&data_dir)
+        .args(["--config-dir"])
+        .arg(&config_dir)
+        .args(["--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(!output.status.success());
+    assert_eq!(report["mode"], "import-package");
+    assert_eq!(report["import_status"], "blocked");
+    assert_eq!(report["app_storage_modified"], false);
+    assert!(report["imported_recipe_id"].is_null());
+    assert!(
+        !report["import_blockers"]
+            .as_array()
+            .expect("blockers")
+            .is_empty()
+    );
+    assert!(!paths.db_path.exists());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
 }
 
 #[test]
@@ -372,4 +459,8 @@ fn combined_output(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn stdout_json(output: &std::process::Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("stdout json")
 }

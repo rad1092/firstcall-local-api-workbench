@@ -67,6 +67,31 @@ fn cli_inspect_package_prints_static_safety_fields() {
 }
 
 #[test]
+fn cli_inspect_package_json_ready_report() {
+    let package = generate_package();
+    let output = inspect_command()
+        .args(["inspect-package", "--dir"])
+        .arg(package.path())
+        .args(["--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(output.status.success(), "{}", combined_output(&output));
+    assert_eq!(report["product"], "FirstCall Agent Recipes");
+    assert_eq!(report["mode"], "inspect-package");
+    assert_eq!(report["import_readiness"], "ready");
+    assert_eq!(report["would_import"], false);
+    assert_eq!(report["would_execute_http"], false);
+    assert_eq!(report["would_modify_app_storage"], false);
+    assert_eq!(report["requires_local_re_verification"], true);
+    assert_eq!(report["generated_mcp_server_source_of_truth"], false);
+    assert_eq!(report["request_fingerprint_recomputation"], "deferred");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+}
+
+#[test]
 fn cli_help_includes_inspect_package_usage() {
     let output = inspect_command().output().expect("run cli");
     let combined = combined_output(&output);
@@ -186,6 +211,34 @@ fn cli_inspect_package_missing_manifest_reports_legacy_blocked() {
 }
 
 #[test]
+fn cli_inspect_package_json_missing_manifest_blocks() {
+    let package = generate_package();
+    fs::remove_file(package.path().join("package.manifest.json")).expect("remove manifest");
+
+    let output = inspect_command()
+        .args(["inspect-package", "--dir"])
+        .arg(package.path())
+        .args(["--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(!output.status.success());
+    assert_eq!(report["mode"], "inspect-package");
+    assert_eq!(report["import_readiness"], "blocked");
+    assert_eq!(report["manifest"], "missing");
+    assert_eq!(report["legacy_package"], true);
+    assert!(
+        !report["import_readiness_blockers"]
+            .as_array()
+            .expect("blockers")
+            .is_empty()
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+}
+
+#[test]
 fn cli_inspect_package_raw_secret_validation_error_does_not_echo_secret() {
     let package = generate_package();
     fs::write(
@@ -265,4 +318,8 @@ fn combined_output(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn stdout_json(output: &std::process::Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("stdout json")
 }

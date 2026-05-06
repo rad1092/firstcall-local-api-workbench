@@ -66,6 +66,32 @@ fn cli_validate_package_success() {
 }
 
 #[test]
+fn cli_validate_package_json_success() {
+    let package = generate_package();
+    let output = validate_command()
+        .args(["validate-package", "--dir"])
+        .arg(package.path())
+        .args(["--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(output.status.success(), "{}", combined_output(&output));
+    assert_eq!(report["product"], "FirstCall Agent Recipes");
+    assert_eq!(report["mode"], "validate-package");
+    assert_eq!(report["status"], "valid");
+    assert!(report["errors"].as_array().expect("errors").is_empty());
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET),
+        "stdout leaked raw secret"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET),
+        "stderr leaked raw secret"
+    );
+}
+
+#[test]
 fn cli_validate_package_warnings_do_not_fail() {
     let package = generate_package();
     fs::write(package.path().join("notes.txt"), "extra local note").expect("write extra");
@@ -398,6 +424,10 @@ fn combined_output(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn stdout_json(output: &std::process::Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("stdout json")
 }
 
 fn read_json(path: &std::path::Path) -> Value {

@@ -15,6 +15,7 @@ use firstcall::verify::{
     VerifyOptions, VerifyPreflightReport, VerifyReport, verify_recipe_preflight_with_process_env,
     verify_recipe_with_process_env,
 };
+use serde_json::{Value, json};
 
 fn main() {
     if let Err(error) = run() {
@@ -54,6 +55,10 @@ fn run() -> Result<()> {
             let lock_out_path = optional_path_arg(&args[1..], "--lock-out");
             let allow_mutating = has_flag(&args[1..], "--allow-mutating");
             let dry_run = has_flag(&args[1..], "--dry-run") || has_flag(&args[1..], "--preflight");
+            let json_output = has_flag(&args[1..], "--json");
+            if json_output && !dry_run {
+                bail!("--json is only supported with verify --dry-run/--preflight");
+            }
             if dry_run && (out_path.is_some() || lock_out_path.is_some()) {
                 bail!("dry-run/preflight cannot write output files");
             }
@@ -63,7 +68,11 @@ fn run() -> Result<()> {
                     &recipe,
                     VerifyOptions { allow_mutating },
                 );
-                print_verify_preflight_report(&report);
+                if json_output {
+                    print_verify_preflight_json(&report)?;
+                } else {
+                    print_verify_preflight_report(&report);
+                }
                 if report.ready() {
                     return Ok(());
                 }
@@ -99,8 +108,13 @@ fn run() -> Result<()> {
         }
         "validate-package" => {
             let package_dir = required_path_arg(&args[1..], "--dir")?;
+            let json_output = has_flag(&args[1..], "--json");
             let report = validate_agent_package_dir(&package_dir);
-            print_package_validation_report(&report);
+            if json_output {
+                print_package_validation_json(&report)?;
+            } else {
+                print_package_validation_report(&report);
+            }
             if report.is_valid() {
                 Ok(())
             } else {
@@ -109,8 +123,13 @@ fn run() -> Result<()> {
         }
         "inspect-package" => {
             let package_dir = required_path_arg(&args[1..], "--dir")?;
+            let json_output = has_flag(&args[1..], "--json");
             let report = inspect_agent_package_dir(&package_dir);
-            print_package_inspect_report(&report);
+            if json_output {
+                print_package_inspect_json(&report)?;
+            } else {
+                print_package_inspect_report(&report);
+            }
             if report.is_ready() {
                 Ok(())
             } else {
@@ -121,13 +140,18 @@ fn run() -> Result<()> {
             let package_dir = required_path_arg(&args[1..], "--dir")?;
             let data_dir = optional_path_arg(&args[1..], "--data-dir");
             let config_dir = optional_path_arg(&args[1..], "--config-dir");
+            let json_output = has_flag(&args[1..], "--json");
             let paths = match (data_dir, config_dir) {
                 (Some(data_dir), Some(config_dir)) => AppPaths::from_root(&data_dir, &config_dir)?,
                 (None, None) => AppPaths::discover()?,
                 _ => bail!("--data-dir and --config-dir must be provided together"),
             };
             let report = import_agent_package_dir(&package_dir, &paths)?;
-            print_package_import_report(&report);
+            if json_output {
+                print_package_import_json(&report)?;
+            } else {
+                print_package_import_report(&report);
+            }
             if report.imported() {
                 Ok(())
             } else {
@@ -277,6 +301,33 @@ fn print_verify_preflight_report(report: &VerifyPreflightReport) {
     }
 }
 
+fn print_verify_preflight_json(report: &VerifyPreflightReport) -> Result<()> {
+    print_json(&json!({
+        "product": "FirstCall Agent Recipes",
+        "mode": "dry-run",
+        "recipe": report.recipe_name,
+        "method": report.method,
+        "url_template": report.sanitized_url_template,
+        "auth_style": report.auth_style,
+        "body_kind": report.body_kind,
+        "mutating_method": report.mutating_method,
+        "allow_mutating": report.allow_mutating,
+        "would_execute_http": report.would_execute_http,
+        "preflight_status": if report.ready() { "ready" } else { "blocked" },
+        "required_env": report.required_env.iter().map(|item| json!({
+            "name": item.name,
+            "status": item.status.label(),
+        })).collect::<Vec<_>>(),
+        "required_slots": report.required_slots.iter().map(|slot| json!({
+            "name": slot.name,
+            "location": slot.location,
+            "required": slot.required,
+            "source": slot.source.label(),
+        })).collect::<Vec<_>>(),
+        "blockers": report.blockers,
+    }))
+}
+
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
@@ -306,6 +357,18 @@ fn print_package_validation_report(report: &PackageValidationReport) {
             println!("- {error}");
         }
     }
+}
+
+fn print_package_validation_json(report: &PackageValidationReport) -> Result<()> {
+    print_json(&json!({
+        "product": "FirstCall Agent Recipes",
+        "mode": "validate-package",
+        "package_dir": report.package_dir.display().to_string(),
+        "status": if report.is_valid() { "valid" } else { "invalid" },
+        "checks_passed": report.checks_passed,
+        "warnings": report.warnings,
+        "errors": report.errors,
+    }))
 }
 
 fn print_package_inspect_report(report: &PackageInspectReport) {
@@ -354,6 +417,32 @@ fn print_package_inspect_report(report: &PackageInspectReport) {
     }
 }
 
+fn print_package_inspect_json(report: &PackageInspectReport) -> Result<()> {
+    print_json(&json!({
+        "product": "FirstCall Agent Recipes",
+        "mode": "inspect-package",
+        "package_dir": report.package_dir.display().to_string(),
+        "validation_status": report.validation_status(),
+        "import_readiness": report.readiness_status(),
+        "manifest": report.manifest_status(),
+        "legacy_package": report.legacy_package(),
+        "would_import": false,
+        "would_execute_http": false,
+        "would_write_files": false,
+        "would_modify_app_storage": false,
+        "requires_local_re_verification": true,
+        "raw_secrets_imported": false,
+        "generated_mcp_server_source_of_truth": false,
+        "request_fingerprint_recomputation": "deferred",
+        "validation": {
+            "checks_passed": report.validation.checks_passed,
+            "warnings": report.validation.warnings,
+            "errors": report.validation.errors,
+        },
+        "import_readiness_blockers": report.blockers,
+    }))
+}
+
 fn print_package_import_report(report: &PackageImportReport) {
     println!("Product: FirstCall Agent Recipes");
     println!("Mode: import-package");
@@ -399,6 +488,33 @@ fn print_package_import_report(report: &PackageImportReport) {
     }
 }
 
+fn print_package_import_json(report: &PackageImportReport) -> Result<()> {
+    print_json(&json!({
+        "product": "FirstCall Agent Recipes",
+        "mode": "import-package",
+        "package_dir": report.package_dir.display().to_string(),
+        "import_status": report.status_label(),
+        "imported_recipe_id": report.imported_recipe_id,
+        "recipe": report.recipe_name,
+        "method": report.method,
+        "url_template": report.safe_url_template,
+        "preserved_verified_status": false,
+        "requires_local_re_verification": true,
+        "secrets_imported": false,
+        "would_execute_http": false,
+        "generated_mcp_server_source_of_truth": false,
+        "app_storage_modified": report.imported(),
+        "validation_status": report.inspect_report.validation_status(),
+        "import_readiness": report.inspect_report.readiness_status(),
+        "import_blockers": report.blockers,
+    }))
+}
+
+fn print_json(value: &Value) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
 fn required_path_arg(args: &[String], flag: &str) -> Result<PathBuf> {
     args.windows(2)
         .find(|pair| pair[0] == flag)
@@ -422,9 +538,9 @@ fn print_help() {
   firstcall-cli version
   firstcall-cli explain --recipe-json PATH
   firstcall-cli package --recipe-json PATH --out DIR
-  firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating] [--dry-run|--preflight]
-  firstcall-cli validate-package --dir PATH
-  firstcall-cli inspect-package --dir PATH
-  firstcall-cli import-package --dir PATH [--data-dir PATH --config-dir PATH]"
+  firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating] [--dry-run|--preflight] [--json]
+  firstcall-cli validate-package --dir PATH [--json]
+  firstcall-cli inspect-package --dir PATH [--json]
+  firstcall-cli import-package --dir PATH [--data-dir PATH --config-dir PATH] [--json]"
     );
 }

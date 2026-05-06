@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use firstcall::model::{
     AuthStyle, BodyTemplate, Confidence, HeaderField, Recipe, RuntimeSlot, SlotLocation,
 };
+use serde_json::Value;
 use tempfile::{TempDir, tempdir};
 
 const RAW_SECRET: &str = "sk_test_verify_raw_secret";
@@ -31,6 +32,42 @@ fn verify_dry_run_alias_reports_ready_without_network() {
 }
 
 #[test]
+fn verify_dry_run_json_reports_ready_without_network() {
+    let recipe = no_auth_recipe("GET");
+    let (_dir, recipe_path) = write_recipe(&recipe);
+
+    let output = verify_command()
+        .args(["verify", "--recipe-json"])
+        .arg(&recipe_path)
+        .args(["--dry-run", "--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(output.status.success(), "{}", combined_output(&output));
+    assert_eq!(report["product"], "FirstCall Agent Recipes");
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["recipe"], "Verify User");
+    assert_eq!(report["method"], "GET");
+    assert_eq!(report["would_execute_http"], false);
+    assert_eq!(report["preflight_status"], "ready");
+    assert!(
+        report["required_env"]
+            .as_array()
+            .expect("required env")
+            .is_empty()
+    );
+    assert!(
+        !report["required_slots"]
+            .as_array()
+            .expect("required slots")
+            .is_empty()
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+}
+
+#[test]
 fn verify_preflight_alias_reports_ready_without_network() {
     let recipe = no_auth_recipe("GET");
     let (_dir, recipe_path) = write_recipe(&recipe);
@@ -47,6 +84,26 @@ fn verify_preflight_alias_reports_ready_without_network() {
     assert!(combined.contains("Mode: dry-run"));
     assert!(combined.contains("Would execute HTTP: no"));
     assert!(combined.contains("Preflight status: ready"));
+}
+
+#[test]
+fn verify_preflight_json_reports_ready_without_network() {
+    let recipe = no_auth_recipe("GET");
+    let (_dir, recipe_path) = write_recipe(&recipe);
+
+    let output = verify_command()
+        .args(["verify", "--recipe-json"])
+        .arg(&recipe_path)
+        .args(["--preflight", "--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(output.status.success(), "{}", combined_output(&output));
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["would_execute_http"], false);
+    assert_eq!(report["preflight_status"], "ready");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
 }
 
 #[test]
@@ -97,6 +154,36 @@ fn verify_dry_run_missing_auth_env_reports_without_secret_leak() {
     assert!(combined.contains("FIRSTCALL_BEARER_TOKEN"));
     assert!(combined.contains("missing"));
     assert!(!combined.contains(RAW_SECRET));
+}
+
+#[test]
+fn verify_dry_run_json_missing_auth_env_reports_without_secret_leak() {
+    let recipe = bearer_recipe("GET");
+    let (_dir, recipe_path) = write_recipe(&recipe);
+
+    let output = verify_command()
+        .args(["verify", "--recipe-json"])
+        .arg(&recipe_path)
+        .args(["--dry-run", "--json"])
+        .env_remove("FIRSTCALL_BEARER_TOKEN")
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(!output.status.success());
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["would_execute_http"], false);
+    assert_eq!(report["preflight_status"], "blocked");
+    assert!(
+        report["required_env"]
+            .as_array()
+            .expect("required env")
+            .iter()
+            .any(|item| item["name"] == "FIRSTCALL_BEARER_TOKEN" && item["status"] == "missing")
+    );
+    assert!(!report["blockers"].as_array().expect("blockers").is_empty());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
 }
 
 #[test]
@@ -377,6 +464,10 @@ fn combined_output(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn stdout_json(output: &std::process::Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("stdout json")
 }
 
 fn verified_time() -> DateTime<Utc> {
