@@ -33,6 +33,7 @@ fn cli_import_package_imports_recipe_into_temp_sqlite() {
 
     assert!(output.status.success(), "{combined}");
     assert!(combined.contains("Import status: imported"));
+    assert!(combined.contains("App storage modified: yes"));
     assert!(combined.contains("Requires local re-verification: yes"));
     assert!(combined.contains("Secrets imported: no"));
     assert!(combined.contains("Would execute HTTP: no"));
@@ -46,6 +47,9 @@ fn cli_import_package_imports_recipe_into_temp_sqlite() {
         imported.url_template,
         "https://api.example.com/users/{{user_id}}?api_key=${FIRSTCALL_API_KEY}"
     );
+    assert!(imported.url_template.contains("${FIRSTCALL_API_KEY}"));
+    assert!(!imported.url_template.contains("{{FIRSTCALL_API_KEY}}"));
+    assert!(imported.url_template.contains("{{user_id}}"));
     assert_eq!(imported.last_success_at, None);
     assert_eq!(imported.last_success_status, None);
     assert!(
@@ -71,6 +75,20 @@ fn cli_import_package_imports_recipe_into_temp_sqlite() {
 }
 
 #[test]
+fn cli_help_includes_import_package_usage() {
+    let output = import_command().output().expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(
+        combined.contains(
+            "firstcall-cli import-package --dir PATH [--data-dir PATH --config-dir PATH]"
+        )
+    );
+    assert!(!combined.contains(RAW_SECRET));
+}
+
+#[test]
 fn missing_manifest_blocks_import_before_sqlite_write() {
     let package = generate_package();
     fs::remove_file(package.path().join("package.manifest.json")).expect("remove manifest");
@@ -92,6 +110,79 @@ fn missing_manifest_blocks_import_before_sqlite_write() {
         !paths.db_path.exists(),
         "blocked import should not create sqlite database"
     );
+}
+
+#[test]
+fn cli_missing_manifest_blocks_without_sqlite_write() {
+    let package = generate_package();
+    fs::remove_file(package.path().join("package.manifest.json")).expect("remove manifest");
+    let storage = tempdir().expect("storage tempdir");
+    let data_dir = storage.path().join("data");
+    let config_dir = storage.path().join("config");
+    let paths = AppPaths::from_root(&data_dir, &config_dir).expect("paths");
+
+    let output = import_command()
+        .args(["import-package", "--dir"])
+        .arg(package.path())
+        .args(["--data-dir"])
+        .arg(&data_dir)
+        .args(["--config-dir"])
+        .arg(&config_dir)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains("Import status: blocked"));
+    assert!(combined.contains("App storage modified: no"));
+    assert!(combined.contains("package import blocked"));
+    assert!(!combined.contains(RAW_SECRET));
+    assert!(!paths.db_path.exists());
+}
+
+#[test]
+fn malformed_recipe_yaml_blocks_import_without_sqlite_write() {
+    let package = generate_package();
+    fs::write(package.path().join("recipe.yaml"), ":\n:").expect("write malformed yaml");
+    refresh_manifest_hash(package.path(), "recipe.yaml");
+    let storage = tempdir().expect("storage tempdir");
+    let paths = AppPaths::from_root(&storage.path().join("data"), &storage.path().join("config"))
+        .expect("paths");
+
+    let report = import_agent_package_dir(package.path(), &paths).expect("import report");
+    let debug = format!("{report:?}");
+
+    assert!(!report.imported());
+    assert!(
+        report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("recipe.yaml") || blocker.contains("conversion"))
+    );
+    assert!(!paths.db_path.exists());
+    assert!(!debug.contains(RAW_SECRET));
+}
+
+#[test]
+fn unsupported_auth_type_blocks_import_without_sqlite_write() {
+    let package = generate_package();
+    edit_recipe_yaml(package.path(), |recipe| {
+        recipe["auth"]["type"] = Value::String("oauth_magic".to_string());
+    });
+    let storage = tempdir().expect("storage tempdir");
+    let paths = AppPaths::from_root(&storage.path().join("data"), &storage.path().join("config"))
+        .expect("paths");
+
+    let report = import_agent_package_dir(package.path(), &paths).expect("import report");
+    let debug = format!("{report:?}");
+
+    assert!(!report.imported());
+    assert!(report.blockers.iter().any(|blocker| {
+        blocker.contains("auth type is not supported")
+            || blocker.contains("package recipe conversion failed")
+    }));
+    assert!(!paths.db_path.exists());
+    assert!(!debug.contains(RAW_SECRET));
 }
 
 #[test]
@@ -236,6 +327,16 @@ fn edit_json_file(root: &Path, relative: &str, edit: impl FnOnce(&mut Value)) {
     edit(&mut value);
     fs::write(&path, serde_json::to_string_pretty(&value).expect("json")).expect("write json");
     refresh_manifest_hash(root, relative);
+}
+
+fn edit_recipe_yaml(root: &Path, edit: impl FnOnce(&mut Value)) {
+    let path = root.join("recipe.yaml");
+    let mut value: Value =
+        yaml_serde::from_str(&fs::read_to_string(&path).expect("read recipe yaml"))
+            .expect("parse recipe yaml");
+    edit(&mut value);
+    fs::write(&path, yaml_serde::to_string(&value).expect("recipe yaml")).expect("write yaml");
+    refresh_manifest_hash(root, "recipe.yaml");
 }
 
 fn refresh_manifest_hash(root: &Path, relative: &str) {
