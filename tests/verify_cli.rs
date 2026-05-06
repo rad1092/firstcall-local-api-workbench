@@ -95,6 +95,9 @@ fn cli_help_includes_recipe_id_verify_usage() {
 
     assert!(!output.status.success());
     assert!(combined.contains(
+        "firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating]"
+    ));
+    assert!(combined.contains(
         "firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--dry-run|--preflight] [--json]"
     ));
     assert!(!combined.contains(RAW_SECRET));
@@ -502,17 +505,16 @@ fn verify_input_source_validation_for_recipe_id() {
     assert!(both_combined.contains("provide only one of --recipe-json or --recipe-id"));
     assert!(!both_combined.contains(RAW_SECRET));
 
-    let non_preflight_output = verify_command()
-        .args(["verify", "--recipe-id", "1"])
+    let json_actual_output = verify_command()
+        .args(["verify", "--recipe-id", "1", "--json"])
         .output()
         .expect("run cli");
-    let non_preflight_combined = combined_output(&non_preflight_output);
-    assert!(!non_preflight_output.status.success());
+    let json_actual_combined = combined_output(&json_actual_output);
+    assert!(!json_actual_output.status.success());
     assert!(
-        non_preflight_combined
-            .contains("verify --recipe-id currently supports only --dry-run/--preflight")
+        json_actual_combined.contains("--json is only supported with verify --dry-run/--preflight")
     );
-    assert!(!non_preflight_combined.contains(RAW_SECRET));
+    assert!(!json_actual_combined.contains(RAW_SECRET));
 
     let data_only_output = verify_command()
         .args(["verify", "--recipe-id", "1", "--data-dir"])

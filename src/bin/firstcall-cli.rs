@@ -65,11 +65,13 @@ fn run() -> Result<()> {
                 (None, None) => bail!("exactly one of --recipe-json or --recipe-id is required"),
                 (Some(_), Some(_)) => bail!("provide only one of --recipe-json or --recipe-id"),
             };
-            if matches!(source, VerifySource::RecipeId(_)) && !dry_run {
-                bail!("verify --recipe-id currently supports only --dry-run/--preflight");
-            }
             if json_output && !dry_run {
                 bail!("--json is only supported with verify --dry-run/--preflight");
+            }
+            if matches!(source, VerifySource::RecipeId(_))
+                && (out_path.is_some() || lock_out_path.is_some())
+            {
+                bail!("verify --recipe-id does not support --out or --lock-out");
             }
             if dry_run && (out_path.is_some() || lock_out_path.is_some()) {
                 bail!("dry-run/preflight cannot write output files");
@@ -129,31 +131,64 @@ fn run() -> Result<()> {
                 }
                 VerifySource::RecipeId(recipe_id) => {
                     let paths = storage_paths_from_args(&args[1..])?;
-                    let recipe = match open_existing_recipe_repository(&paths)? {
-                        Some(repository) => repository.get_recipe(recipe_id)?,
-                        None => None,
-                    };
-                    let Some(recipe) = recipe else {
+                    if dry_run {
+                        let recipe = match open_existing_recipe_repository(&paths)? {
+                            Some(repository) => repository.get_recipe(recipe_id)?,
+                            None => None,
+                        };
+                        let Some(recipe) = recipe else {
+                            if json_output {
+                                print_verify_recipe_id_not_found_json(recipe_id)?;
+                            } else {
+                                print_verify_recipe_id_not_found_report(recipe_id);
+                            }
+                            bail!("recipe not found: {recipe_id}");
+                        };
+                        let report = verify_recipe_preflight_with_process_env(
+                            &recipe,
+                            VerifyOptions { allow_mutating },
+                        );
                         if json_output {
-                            print_verify_recipe_id_not_found_json(recipe_id)?;
+                            print_verify_preflight_json_for_recipe_id(&report, recipe_id)?;
                         } else {
-                            print_verify_recipe_id_not_found_report(recipe_id);
+                            print_verify_preflight_report(&report);
                         }
-                        bail!("recipe not found: {recipe_id}");
-                    };
-                    let report = verify_recipe_preflight_with_process_env(
-                        &recipe,
-                        VerifyOptions { allow_mutating },
-                    );
-                    if json_output {
-                        print_verify_preflight_json_for_recipe_id(&report, recipe_id)?;
+                        if report.ready() {
+                            Ok(())
+                        } else {
+                            bail!("verification preflight failed")
+                        }
                     } else {
-                        print_verify_preflight_report(&report);
-                    }
-                    if report.ready() {
-                        Ok(())
-                    } else {
-                        bail!("verification preflight failed")
+                        let Some(repository) = open_existing_recipe_repository_for_update(&paths)?
+                        else {
+                            print_verify_recipe_id_not_found_report(recipe_id);
+                            bail!("recipe not found: {recipe_id}");
+                        };
+                        let Some(recipe) = repository.get_recipe(recipe_id)? else {
+                            print_verify_recipe_id_not_found_report(recipe_id);
+                            bail!("recipe not found: {recipe_id}");
+                        };
+                        match verify_recipe_with_process_env(
+                            &recipe,
+                            VerifyOptions { allow_mutating },
+                        ) {
+                            Ok(report) => {
+                                print_verify_summary(&report);
+                                if !report.success() {
+                                    bail!("verification failed");
+                                }
+                                repository.update_recipe_verification(
+                                    recipe_id,
+                                    &report.updated_recipe,
+                                )?;
+                                println!("Updated stored recipe verification: {recipe_id}");
+                                Ok(())
+                            }
+                            Err(error) => {
+                                print_verify_preflight_failure(&recipe, &error);
+                                bail!("verification preflight failed");
+                            }
+                        }
                     }
                 }
             }
@@ -687,6 +722,25 @@ fn open_existing_recipe_repository(paths: &AppPaths) -> Result<Option<AppReposit
     Ok(Some(AppRepository::new(connection)))
 }
 
+fn open_existing_recipe_repository_for_update(paths: &AppPaths) -> Result<Option<AppRepository>> {
+    if !paths.db_path.exists() {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(
+        &paths.db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| {
+        format!(
+            "Could not open existing recipe database for update {}",
+            paths.db_path.display()
+        )
+    })?;
+    Ok(Some(AppRepository::new(connection)))
+}
+
 fn recipe_summary(id: i64, recipe: &Recipe) -> RecipeSummary {
     RecipeSummary {
         id,
@@ -905,6 +959,7 @@ fn print_help() {
   firstcall-cli package --recipe-json PATH --out DIR
   firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]
   firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]
+  firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating]
   firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--dry-run|--preflight] [--json]
   firstcall-cli validate-package --dir PATH [--json]
   firstcall-cli inspect-package --dir PATH [--json]

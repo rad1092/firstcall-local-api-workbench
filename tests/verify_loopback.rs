@@ -1,14 +1,17 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use firstcall::model::{AuthStyle, BodyTemplate, Confidence, Recipe, RuntimeSlot, SlotLocation};
+use firstcall::store::db::{AppPaths, open_database};
+use firstcall::store::repos::AppRepository;
 use firstcall::verify::{VerifyOptions, verify_recipe_with_env};
 use serde_json::Value;
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 
 const RAW_SECRET: &str = "sk_loopback_raw_secret_123";
 const RAW_BASIC_PASSWORD: &str = "loopback_basic_password_secret";
@@ -339,6 +342,235 @@ fn verify_dry_run_against_loopback_does_not_execute_network() {
     assert_no_raw_secret(&combined);
 }
 
+#[test]
+fn cli_verify_recipe_id_updates_storage_on_local_success() {
+    let server = spawn_one_shot_http_server(200, r#"{"ok":true}"#);
+    let storage = store_recipe(&no_auth_recipe("GET", &server.base_url));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .output()
+        .expect("run cli");
+    let captured = server.join();
+    let combined = combined_output(&output);
+
+    assert_eq!(captured.requests_received, 1);
+    assert!(captured.request_text.is_some());
+    assert!(output.status.success(), "{combined}");
+    assert!(combined.contains("HTTP status: 200"));
+    assert!(combined.contains("Outcome: success"));
+    assert!(combined.contains("Updated stored recipe verification"));
+    assert_no_raw_secret(&combined);
+
+    let stored = read_stored_recipe(&storage);
+    assert!(stored.last_success_at.is_some());
+    assert_eq!(stored.last_success_status, Some(200));
+    assert_no_raw_secret(&serde_json::to_string(&stored).expect("stored json"));
+}
+
+#[test]
+fn cli_verify_recipe_id_non_2xx_does_not_update_storage() {
+    let server = spawn_one_shot_http_server(401, r#"{"error":"unauthorized"}"#);
+    let storage = store_recipe(&no_auth_recipe("GET", &server.base_url));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .output()
+        .expect("run cli");
+    let captured = server.join();
+    let combined = combined_output(&output);
+
+    assert_eq!(captured.requests_received, 1);
+    assert!(captured.request_text.is_some());
+    assert!(!output.status.success());
+    assert!(combined.contains("HTTP status: 401"));
+    assert_no_raw_secret(&combined);
+
+    let stored = read_stored_recipe(&storage);
+    assert!(stored.last_success_at.is_none());
+    assert_eq!(stored.last_success_status, None);
+}
+
+#[test]
+fn cli_verify_recipe_id_mutating_method_requires_allow_before_network() {
+    let server = spawn_no_request_http_server();
+    let storage = store_recipe(&no_auth_recipe("POST", &server.base_url));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .output()
+        .expect("run cli");
+    let captured = server.join();
+    let combined = combined_output(&output);
+
+    assert_eq!(captured.requests_received, 0);
+    assert!(captured.request_text.is_none());
+    assert!(!output.status.success());
+    assert!(combined.contains("--allow-mutating"));
+    assert_no_raw_secret(&combined);
+
+    let stored = read_stored_recipe(&storage);
+    assert!(stored.last_success_at.is_none());
+    assert_eq!(stored.last_success_status, None);
+}
+
+#[test]
+fn cli_verify_recipe_id_mutating_method_with_allow_updates_storage() {
+    let server = spawn_one_shot_http_server(200, r#"{"ok":true}"#);
+    let storage = store_recipe(&no_auth_recipe("POST", &server.base_url));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--allow-mutating"])
+        .output()
+        .expect("run cli");
+    let captured = server.join();
+    let combined = combined_output(&output);
+
+    assert_eq!(captured.requests_received, 1);
+    assert!(captured.request_text.is_some());
+    assert!(output.status.success(), "{combined}");
+    assert_no_raw_secret(&combined);
+
+    let stored = read_stored_recipe(&storage);
+    assert!(stored.last_success_at.is_some());
+    assert_eq!(stored.last_success_status, Some(200));
+}
+
+#[test]
+fn cli_verify_recipe_id_missing_storage_does_not_create_database() {
+    let root = tempdir().expect("tempdir");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    let paths = AppPaths::from_root(&data_dir, &config_dir).expect("paths");
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id", "42", "--data-dir"])
+        .arg(&data_dir)
+        .args(["--config-dir"])
+        .arg(&config_dir)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains("Status: not_found") || combined.contains("recipe not found"));
+    assert!(!paths.db_path.exists());
+    assert!(!data_dir.exists());
+    assert!(!config_dir.exists());
+    assert_no_raw_secret(&combined);
+}
+
+#[test]
+fn cli_verify_recipe_id_dry_run_does_not_update_storage() {
+    let server = spawn_no_request_http_server();
+    let storage = store_recipe(&no_auth_recipe("GET", &server.base_url));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--dry-run"])
+        .output()
+        .expect("run cli");
+    let captured = server.join();
+    let combined = combined_output(&output);
+
+    assert_eq!(captured.requests_received, 0);
+    assert!(captured.request_text.is_none());
+    assert!(output.status.success(), "{combined}");
+    assert!(combined.contains("Would execute HTTP: no"));
+    assert_no_raw_secret(&combined);
+
+    let stored = read_stored_recipe(&storage);
+    assert!(stored.last_success_at.is_none());
+    assert_eq!(stored.last_success_status, None);
+}
+
+#[test]
+fn cli_verify_recipe_id_actual_json_is_rejected_before_http_and_storage_update() {
+    let server = spawn_no_request_http_server();
+    let storage = store_recipe(&no_auth_recipe("GET", &server.base_url));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--json"])
+        .output()
+        .expect("run cli");
+    let captured = server.join();
+    let combined = combined_output(&output);
+
+    assert_eq!(captured.requests_received, 0);
+    assert!(!output.status.success());
+    assert!(combined.contains("--json is only supported with verify --dry-run/--preflight"));
+    assert_no_raw_secret(&combined);
+
+    let stored = read_stored_recipe(&storage);
+    assert!(stored.last_success_at.is_none());
+    assert_eq!(stored.last_success_status, None);
+}
+
+#[test]
+fn cli_verify_recipe_id_rejects_output_paths_before_http_and_storage_update() {
+    for flag in ["--out", "--lock-out"] {
+        let server = spawn_no_request_http_server();
+        let storage = store_recipe(&no_auth_recipe("GET", &server.base_url));
+        let output_path = storage.root.path().join("should-not-exist.json");
+
+        let output = verify_command()
+            .args(["verify", "--recipe-id"])
+            .arg(storage.recipe_id.to_string())
+            .args(["--data-dir"])
+            .arg(&storage.data_dir)
+            .args(["--config-dir"])
+            .arg(&storage.config_dir)
+            .arg(flag)
+            .arg(&output_path)
+            .output()
+            .expect("run cli");
+        let captured = server.join();
+        let combined = combined_output(&output);
+
+        assert_eq!(captured.requests_received, 0);
+        assert!(!output.status.success());
+        assert!(combined.contains("verify --recipe-id does not support --out or --lock-out"));
+        assert!(!output_path.exists());
+        assert_no_raw_secret(&combined);
+
+        let stored = read_stored_recipe(&storage);
+        assert!(stored.last_success_at.is_none());
+        assert_eq!(stored.last_success_status, None);
+    }
+}
+
 fn no_auth_recipe(method: &str, base_url: &str) -> Recipe {
     Recipe {
         id: None,
@@ -378,6 +610,37 @@ fn write_recipe(path: &std::path::Path, recipe: &Recipe) {
         serde_json::to_string_pretty(recipe).expect("recipe json"),
     )
     .expect("write recipe");
+}
+
+struct StoredRecipe {
+    root: TempDir,
+    data_dir: PathBuf,
+    config_dir: PathBuf,
+    recipe_id: i64,
+}
+
+fn store_recipe(recipe: &Recipe) -> StoredRecipe {
+    let root = tempdir().expect("tempdir");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    let paths = AppPaths::from_root(&data_dir, &config_dir).expect("paths");
+    let repository = AppRepository::new(open_database(&paths).expect("db"));
+    let recipe_id = repository.insert_recipe(recipe).expect("insert recipe");
+    StoredRecipe {
+        root,
+        data_dir,
+        config_dir,
+        recipe_id,
+    }
+}
+
+fn read_stored_recipe(storage: &StoredRecipe) -> Recipe {
+    let paths = AppPaths::from_root(&storage.data_dir, &storage.config_dir).expect("paths");
+    let repository = AppRepository::new(open_database(&paths).expect("db"));
+    repository
+        .get_recipe(storage.recipe_id)
+        .expect("get recipe")
+        .expect("stored recipe")
 }
 
 fn verify_command() -> Command {

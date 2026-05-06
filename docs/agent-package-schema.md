@@ -443,7 +443,7 @@ Several CLI surfaces support `--json` for agents, CI, and scripts:
 
 JSON reports use safe, sanitized fields. Environment variable names may appear, but environment variable values and raw secrets must not appear. Blocked report states should still emit parseable JSON to stdout when a report can be built. Argument and usage errors may remain normal stderr-only errors.
 
-`verify --recipe-id` is storage-backed preflight only in this phase. It reads from local recipe storage, does not execute HTTP, does not update SQLite, and leaves actual HTTP verification by recipe id as future work.
+`verify --recipe-id` also supports human-readable actual local verification from local recipe storage. Its `--dry-run` and `--preflight` forms do not execute HTTP or update SQLite. Actual `verify --recipe-id` updates local SQLite verification metadata only after successful verification and does not support `--json`, `--out`, or `--lock-out` in this phase.
 
 Actual non-dry-run HTTP `verify --json` is not supported yet.
 
@@ -487,7 +487,7 @@ Open questions:
 
 - Whether future import should record package provenance in SQLite.
 - Whether legacy packages without `package.manifest.json` should be importable behind an explicit flag.
-- Whether future `recipe-export-json`, actual HTTP `verify --recipe-id`, and `package --recipe-id` should expose only safe/redacted recipe fields.
+- Whether future `recipe-export-json` and `package --recipe-id` should expose only safe/redacted recipe fields.
 
 ## Non-Goals
 

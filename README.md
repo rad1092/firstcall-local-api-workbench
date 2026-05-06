@@ -76,6 +76,7 @@ firstcall-cli explain --recipe-json PATH
 firstcall-cli package --recipe-json PATH --out DIR
 firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]
 firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]
+firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating]
 firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--dry-run|--preflight] [--json]
 firstcall-cli validate-package --dir PATH [--json]
 firstcall-cli inspect-package --dir PATH [--json]
@@ -165,6 +166,10 @@ cargo run --bin firstcall-cli -- verify --recipe-json ./recipe.json --preflight 
 Run the same preflight against a recipe already in local recipe storage:
 
 ```powershell
+cargo run --bin firstcall-cli -- verify --recipe-id 1
+```
+
+```powershell
 cargo run --bin firstcall-cli -- verify --recipe-id 1 --dry-run --json
 ```
 
@@ -172,7 +177,7 @@ cargo run --bin firstcall-cli -- verify --recipe-id 1 --dry-run --json
 cargo run --bin firstcall-cli -- verify --recipe-id 1 --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config --dry-run --json
 ```
 
-`verify --dry-run` and `verify --preflight` are aliases. They perform local static/runtime-input preflight only, do not execute HTTP, and do not write `--out` or `--lock-out` files. Human and JSON reports list required environment variables by name with `set` or `missing` status only, never environment values or raw secrets. Mutating methods still require `--allow-mutating` to be ready for real verification. `verify --recipe-id` is preflight-only in this phase: it reads from local recipe storage, does not execute HTTP, and does not update SQLite. Actual HTTP verify-by-id is deferred, and actual HTTP verify still uses human-readable output only in this phase.
+`verify --dry-run` and `verify --preflight` are aliases. They perform local static/runtime-input preflight only, do not execute HTTP, and do not write `--out` or `--lock-out` files. Human and JSON reports list required environment variables by name with `set` or `missing` status only, never environment values or raw secrets. Mutating methods still require `--allow-mutating` to be ready for real verification. `verify --recipe-id` reads from local recipe storage and can perform actual local verification; on success it updates local SQLite verification metadata. In this phase, actual `verify --recipe-id` does not support `--json`, `--out`, or `--lock-out`.
 
 `verify --dry-run` checks whether a recipe is ready to execute. `validate-package` checks exported package structure and integrity.
 
