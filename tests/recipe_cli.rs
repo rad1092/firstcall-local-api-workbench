@@ -258,6 +258,9 @@ fn cli_help_includes_recipe_storage_usage_and_verify_json_boundary() {
         "firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]"
     ));
     assert!(combined.contains("firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]"));
+    assert!(combined.contains(
+        "firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--dry-run|--preflight] [--json]"
+    ));
     assert!(!combined.contains(RAW_SECRET));
 }
 

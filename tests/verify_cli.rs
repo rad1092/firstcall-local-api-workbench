@@ -1,10 +1,13 @@
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 use chrono::{DateTime, Utc};
 use firstcall::model::{
     AuthStyle, BodyTemplate, Confidence, HeaderField, Recipe, RuntimeSlot, SlotLocation,
 };
+use firstcall::store::db::{AppPaths, open_database};
+use firstcall::store::repos::AppRepository;
 use serde_json::Value;
 use tempfile::{TempDir, tempdir};
 
@@ -82,6 +85,18 @@ fn verify_json_without_dry_run_or_preflight_is_rejected() {
 
     assert!(!output.status.success());
     assert!(combined.contains("--json is only supported with verify --dry-run/--preflight"));
+    assert!(!combined.contains(RAW_SECRET));
+}
+
+#[test]
+fn cli_help_includes_recipe_id_verify_usage() {
+    let output = verify_command().output().expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains(
+        "firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--dry-run|--preflight] [--json]"
+    ));
     assert!(!combined.contains(RAW_SECRET));
 }
 
@@ -232,6 +247,294 @@ fn verify_dry_run_json_set_auth_env_does_not_print_value() {
     assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
     assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
     assert!(!report.to_string().contains(RAW_SECRET));
+}
+
+#[test]
+fn verify_recipe_id_dry_run_ready_from_storage() {
+    let storage = store_recipe(&no_auth_recipe("GET"));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--dry-run"])
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(output.status.success(), "{combined}");
+    assert!(combined.contains("Mode: dry-run"));
+    assert!(combined.contains("Preflight status: ready"));
+    assert!(combined.contains("Would execute HTTP: no"));
+    assert!(!combined.contains(RAW_SECRET));
+}
+
+#[test]
+fn verify_recipe_id_dry_run_json_ready_from_storage() {
+    let storage = store_recipe(&no_auth_recipe("GET"));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--dry-run", "--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(output.status.success(), "{}", combined_output(&output));
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["source"], "recipe-id");
+    assert_eq!(report["recipe_id"], storage.recipe_id);
+    assert_eq!(report["would_execute_http"], false);
+    assert_eq!(report["preflight_status"], "ready");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+}
+
+#[test]
+fn verify_recipe_id_preflight_json_alias_from_storage() {
+    let storage = store_recipe(&no_auth_recipe("GET"));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--preflight", "--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(output.status.success(), "{}", combined_output(&output));
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["source"], "recipe-id");
+    assert_eq!(report["recipe_id"], storage.recipe_id);
+    assert_eq!(report["would_execute_http"], false);
+}
+
+#[test]
+fn verify_recipe_id_dry_run_json_blocks_on_missing_env() {
+    let storage = store_recipe(&bearer_recipe("GET"));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--dry-run", "--json"])
+        .env_remove("FIRSTCALL_BEARER_TOKEN")
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(!output.status.success());
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["source"], "recipe-id");
+    assert_eq!(report["recipe_id"], storage.recipe_id);
+    assert_eq!(report["preflight_status"], "blocked");
+    assert_eq!(report["would_execute_http"], false);
+    assert!(
+        report["required_env"]
+            .as_array()
+            .expect("required env")
+            .iter()
+            .any(|item| item["name"] == "FIRSTCALL_BEARER_TOKEN" && item["status"] == "missing")
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+    assert!(!report.to_string().contains(RAW_SECRET));
+}
+
+#[test]
+fn verify_recipe_id_dry_run_json_set_env_does_not_print_value() {
+    let storage = store_recipe(&bearer_recipe("GET"));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--dry-run", "--json"])
+        .env("FIRSTCALL_BEARER_TOKEN", RAW_SECRET)
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(output.status.success());
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["source"], "recipe-id");
+    assert_eq!(report["recipe_id"], storage.recipe_id);
+    assert_eq!(report["preflight_status"], "ready");
+    assert_eq!(report["would_execute_http"], false);
+    assert!(
+        report["required_env"]
+            .as_array()
+            .expect("required env")
+            .iter()
+            .any(|item| item["name"] == "FIRSTCALL_BEARER_TOKEN" && item["status"] == "set")
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+    assert!(!report.to_string().contains(RAW_SECRET));
+}
+
+#[test]
+fn verify_recipe_id_missing_storage_json_reports_not_found_without_creating_db() {
+    let storage = fresh_storage_paths();
+    let recipe_id = 42;
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--dry-run", "--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(!output.status.success());
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["source"], "recipe-id");
+    assert_eq!(report["status"], "not_found");
+    assert!(report["recipe"].is_null());
+    assert_eq!(report["recipe_id"], recipe_id);
+    assert_eq!(report["would_execute_http"], false);
+    assert!(!storage.paths.db_path.exists());
+    assert!(!storage.data_dir.exists());
+    assert!(!storage.config_dir.exists());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+}
+
+#[test]
+fn verify_recipe_id_missing_storage_human_reports_not_found_without_creating_db() {
+    let storage = fresh_storage_paths();
+    let recipe_id = 42;
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--dry-run"])
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains("Status: not_found") || combined.contains("recipe not found"));
+    assert!(combined.contains("Would execute HTTP: no"));
+    assert!(!storage.paths.db_path.exists());
+    assert!(!storage.data_dir.exists());
+    assert!(!storage.config_dir.exists());
+    assert!(!combined.contains(RAW_SECRET));
+}
+
+#[test]
+fn verify_recipe_id_missing_id_json_reports_not_found() {
+    let storage = store_recipe(&no_auth_recipe("GET"));
+    let missing_id = storage.recipe_id + 1000;
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(missing_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--dry-run", "--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(!output.status.success());
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["source"], "recipe-id");
+    assert_eq!(report["status"], "not_found");
+    assert!(report["recipe"].is_null());
+    assert_eq!(report["recipe_id"], missing_id);
+    assert_eq!(report["would_execute_http"], false);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+}
+
+#[test]
+fn verify_input_source_validation_for_recipe_id() {
+    let recipe = no_auth_recipe("GET");
+    let (_dir, recipe_path) = write_recipe(&recipe);
+    let temp = tempdir().expect("tempdir");
+
+    let neither_output = verify_command()
+        .args(["verify", "--dry-run"])
+        .output()
+        .expect("run cli");
+    let neither_combined = combined_output(&neither_output);
+    assert!(!neither_output.status.success());
+    assert!(neither_combined.contains("exactly one of --recipe-json or --recipe-id is required"));
+    assert!(!neither_combined.contains(RAW_SECRET));
+
+    let both_output = verify_command()
+        .args(["verify", "--recipe-json"])
+        .arg(&recipe_path)
+        .args(["--recipe-id", "1", "--dry-run"])
+        .output()
+        .expect("run cli");
+    let both_combined = combined_output(&both_output);
+    assert!(!both_output.status.success());
+    assert!(both_combined.contains("provide only one of --recipe-json or --recipe-id"));
+    assert!(!both_combined.contains(RAW_SECRET));
+
+    let non_preflight_output = verify_command()
+        .args(["verify", "--recipe-id", "1"])
+        .output()
+        .expect("run cli");
+    let non_preflight_combined = combined_output(&non_preflight_output);
+    assert!(!non_preflight_output.status.success());
+    assert!(
+        non_preflight_combined
+            .contains("verify --recipe-id currently supports only --dry-run/--preflight")
+    );
+    assert!(!non_preflight_combined.contains(RAW_SECRET));
+
+    let data_only_output = verify_command()
+        .args(["verify", "--recipe-id", "1", "--data-dir"])
+        .arg(temp.path().join("data"))
+        .args(["--dry-run"])
+        .output()
+        .expect("run cli");
+    let data_only_combined = combined_output(&data_only_output);
+    assert!(!data_only_output.status.success());
+    assert!(data_only_combined.contains("--data-dir and --config-dir must be provided together"));
+    assert!(!data_only_combined.contains(RAW_SECRET));
+
+    let config_only_output = verify_command()
+        .args(["verify", "--recipe-id", "1", "--config-dir"])
+        .arg(temp.path().join("config"))
+        .args(["--dry-run"])
+        .output()
+        .expect("run cli");
+    let config_only_combined = combined_output(&config_only_output);
+    assert!(!config_only_output.status.success());
+    assert!(config_only_combined.contains("--data-dir and --config-dir must be provided together"));
+    assert!(!config_only_combined.contains(RAW_SECRET));
 }
 
 #[test]
@@ -500,6 +803,48 @@ fn write_recipe(recipe: &Recipe) -> (TempDir, std::path::PathBuf) {
     )
     .expect("write recipe");
     (dir, path)
+}
+
+struct StoredRecipe {
+    _root: TempDir,
+    data_dir: PathBuf,
+    config_dir: PathBuf,
+    recipe_id: i64,
+}
+
+struct FreshStorage {
+    _root: TempDir,
+    data_dir: PathBuf,
+    config_dir: PathBuf,
+    paths: AppPaths,
+}
+
+fn store_recipe(recipe: &Recipe) -> StoredRecipe {
+    let root = tempdir().expect("tempdir");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    let paths = AppPaths::from_root(&data_dir, &config_dir).expect("paths");
+    let repository = AppRepository::new(open_database(&paths).expect("db"));
+    let recipe_id = repository.insert_recipe(recipe).expect("insert recipe");
+    StoredRecipe {
+        _root: root,
+        data_dir,
+        config_dir,
+        recipe_id,
+    }
+}
+
+fn fresh_storage_paths() -> FreshStorage {
+    let root = tempdir().expect("tempdir");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    let paths = AppPaths::from_root(&data_dir, &config_dir).expect("paths");
+    FreshStorage {
+        _root: root,
+        data_dir,
+        config_dir,
+        paths,
+    }
 }
 
 fn verify_command() -> Command {

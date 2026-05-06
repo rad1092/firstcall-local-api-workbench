@@ -52,59 +52,109 @@ fn run() -> Result<()> {
             Ok(())
         }
         "verify" => {
-            let recipe_json = required_path_arg(&args[1..], "--recipe-json")?;
+            let recipe_json = optional_path_arg(&args[1..], "--recipe-json");
+            let recipe_id = optional_i64_arg(&args[1..], "--recipe-id")?;
             let out_path = optional_path_arg(&args[1..], "--out");
             let lock_out_path = optional_path_arg(&args[1..], "--lock-out");
             let allow_mutating = has_flag(&args[1..], "--allow-mutating");
             let dry_run = has_flag(&args[1..], "--dry-run") || has_flag(&args[1..], "--preflight");
             let json_output = has_flag(&args[1..], "--json");
+            let source = match (recipe_json, recipe_id) {
+                (Some(path), None) => VerifySource::RecipeJson(path),
+                (None, Some(id)) => VerifySource::RecipeId(id),
+                (None, None) => bail!("exactly one of --recipe-json or --recipe-id is required"),
+                (Some(_), Some(_)) => bail!("provide only one of --recipe-json or --recipe-id"),
+            };
+            if matches!(source, VerifySource::RecipeId(_)) && !dry_run {
+                bail!("verify --recipe-id currently supports only --dry-run/--preflight");
+            }
             if json_output && !dry_run {
                 bail!("--json is only supported with verify --dry-run/--preflight");
             }
             if dry_run && (out_path.is_some() || lock_out_path.is_some()) {
                 bail!("dry-run/preflight cannot write output files");
             }
-            let recipe = read_recipe_json(&recipe_json)?;
-            if dry_run {
-                let report = verify_recipe_preflight_with_process_env(
-                    &recipe,
-                    VerifyOptions { allow_mutating },
-                );
-                if json_output {
-                    print_verify_preflight_json(&report)?;
-                } else {
-                    print_verify_preflight_report(&report);
-                }
-                if report.ready() {
-                    return Ok(());
-                }
-                bail!("verification preflight failed");
-            }
-            match verify_recipe_with_process_env(&recipe, VerifyOptions { allow_mutating }) {
-                Ok(report) => {
-                    print_verify_summary(&report);
-                    if !report.success() {
-                        bail!("verification failed");
+            match source {
+                VerifySource::RecipeJson(recipe_json) => {
+                    let recipe = read_recipe_json(&recipe_json)?;
+                    if dry_run {
+                        let report = verify_recipe_preflight_with_process_env(
+                            &recipe,
+                            VerifyOptions { allow_mutating },
+                        );
+                        if json_output {
+                            print_verify_preflight_json(&report)?;
+                        } else {
+                            print_verify_preflight_report(&report);
+                        }
+                        if report.ready() {
+                            return Ok(());
+                        }
+                        bail!("verification preflight failed");
                     }
-                    if let Some(path) = out_path {
-                        fs::write(&path, serde_json::to_string_pretty(&report.updated_recipe)?)
-                            .with_context(|| {
-                                format!("Could not write verified recipe {}", path.display())
-                            })?;
-                        println!("Wrote verified recipe: {}", path.display());
+                    match verify_recipe_with_process_env(&recipe, VerifyOptions { allow_mutating })
+                    {
+                        Ok(report) => {
+                            print_verify_summary(&report);
+                            if !report.success() {
+                                bail!("verification failed");
+                            }
+                            if let Some(path) = out_path {
+                                fs::write(
+                                    &path,
+                                    serde_json::to_string_pretty(&report.updated_recipe)?,
+                                )
+                                .with_context(|| {
+                                    format!("Could not write verified recipe {}", path.display())
+                                })?;
+                                println!("Wrote verified recipe: {}", path.display());
+                            }
+                            if let Some(path) = lock_out_path {
+                                fs::write(
+                                    &path,
+                                    recipe_to_verified_lock_json(&report.updated_recipe)?,
+                                )
+                                .with_context(|| {
+                                    format!("Could not write verified lock {}", path.display())
+                                })?;
+                                println!("Wrote verified lock: {}", path.display());
+                            }
+                            Ok(())
+                        }
+                        Err(error) => {
+                            print_verify_preflight_failure(&recipe, &error);
+                            bail!("verification preflight failed");
+                        }
                     }
-                    if let Some(path) = lock_out_path {
-                        fs::write(&path, recipe_to_verified_lock_json(&report.updated_recipe)?)
-                            .with_context(|| {
-                                format!("Could not write verified lock {}", path.display())
-                            })?;
-                        println!("Wrote verified lock: {}", path.display());
-                    }
-                    Ok(())
                 }
-                Err(error) => {
-                    print_verify_preflight_failure(&recipe, &error);
-                    bail!("verification preflight failed");
+                VerifySource::RecipeId(recipe_id) => {
+                    let paths = storage_paths_from_args(&args[1..])?;
+                    let recipe = match open_existing_recipe_repository(&paths)? {
+                        Some(repository) => repository.get_recipe(recipe_id)?,
+                        None => None,
+                    };
+                    let Some(recipe) = recipe else {
+                        if json_output {
+                            print_verify_recipe_id_not_found_json(recipe_id)?;
+                        } else {
+                            print_verify_recipe_id_not_found_report(recipe_id);
+                        }
+                        bail!("recipe not found: {recipe_id}");
+                    };
+                    let report = verify_recipe_preflight_with_process_env(
+                        &recipe,
+                        VerifyOptions { allow_mutating },
+                    );
+                    if json_output {
+                        print_verify_preflight_json_for_recipe_id(&report, recipe_id)?;
+                    } else {
+                        print_verify_preflight_report(&report);
+                    }
+                    if report.ready() {
+                        Ok(())
+                    } else {
+                        bail!("verification preflight failed")
+                    }
                 }
             }
         }
@@ -337,7 +387,23 @@ fn print_verify_preflight_report(report: &VerifyPreflightReport) {
 }
 
 fn print_verify_preflight_json(report: &VerifyPreflightReport) -> Result<()> {
-    print_json(&json!({
+    print_json(&verify_preflight_json_value(report))
+}
+
+fn print_verify_preflight_json_for_recipe_id(
+    report: &VerifyPreflightReport,
+    recipe_id: i64,
+) -> Result<()> {
+    let mut value = verify_preflight_json_value(report);
+    if let Value::Object(object) = &mut value {
+        object.insert("source".to_string(), json!("recipe-id"));
+        object.insert("recipe_id".to_string(), json!(recipe_id));
+    }
+    print_json(&value)
+}
+
+fn verify_preflight_json_value(report: &VerifyPreflightReport) -> Value {
+    json!({
         "product": "FirstCall Agent Recipes",
         "mode": "dry-run",
         "recipe": report.recipe_name,
@@ -360,6 +426,28 @@ fn print_verify_preflight_json(report: &VerifyPreflightReport) -> Result<()> {
             "source": slot.source.label(),
         })).collect::<Vec<_>>(),
         "blockers": report.blockers,
+    })
+}
+
+fn print_verify_recipe_id_not_found_report(recipe_id: i64) {
+    println!("Product: FirstCall Agent Recipes");
+    println!("Mode: dry-run");
+    println!("Source: recipe-id");
+    println!("Recipe id: {recipe_id}");
+    println!("Status: not_found");
+    println!("Recipe: n/a");
+    println!("Would execute HTTP: no");
+}
+
+fn print_verify_recipe_id_not_found_json(recipe_id: i64) -> Result<()> {
+    print_json(&json!({
+        "product": "FirstCall Agent Recipes",
+        "mode": "dry-run",
+        "source": "recipe-id",
+        "recipe_id": recipe_id,
+        "status": "not_found",
+        "recipe": null,
+        "would_execute_http": false,
     }))
 }
 
@@ -791,6 +879,14 @@ fn required_i64_arg(args: &[String], flag: &str) -> Result<i64> {
         .with_context(|| format!("missing required argument {flag}"))
 }
 
+fn optional_i64_arg(args: &[String], flag: &str) -> Result<Option<i64>> {
+    args.windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| pair[1].parse::<i64>())
+        .transpose()
+        .with_context(|| format!("invalid value for {flag}"))
+}
+
 fn storage_paths_from_args(args: &[String]) -> Result<AppPaths> {
     let data_dir = optional_path_arg(args, "--data-dir");
     let config_dir = optional_path_arg(args, "--config-dir");
@@ -809,10 +905,16 @@ fn print_help() {
   firstcall-cli package --recipe-json PATH --out DIR
   firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]
   firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]
+  firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--dry-run|--preflight] [--json]
   firstcall-cli validate-package --dir PATH [--json]
   firstcall-cli inspect-package --dir PATH [--json]
   firstcall-cli import-package --dir PATH [--data-dir PATH --config-dir PATH] [--json]
   firstcall-cli recipe-list [--data-dir PATH --config-dir PATH] [--json]
   firstcall-cli recipe-show --id ID [--data-dir PATH --config-dir PATH] [--json]"
     );
+}
+
+enum VerifySource {
+    RecipeJson(PathBuf),
+    RecipeId(i64),
 }

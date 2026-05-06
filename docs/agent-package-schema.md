@@ -436,10 +436,14 @@ Several CLI surfaces support `--json` for agents, CI, and scripts:
 - `firstcall-cli import-package --dir PATH --json`
 - `firstcall-cli verify --recipe-json PATH --dry-run --json`
 - `firstcall-cli verify --recipe-json PATH --preflight --json`
+- `firstcall-cli verify --recipe-id ID --dry-run --json`
+- `firstcall-cli verify --recipe-id ID --preflight --json`
 - `firstcall-cli recipe-list --json`
 - `firstcall-cli recipe-show --id ID --json`
 
 JSON reports use safe, sanitized fields. Environment variable names may appear, but environment variable values and raw secrets must not appear. Blocked report states should still emit parseable JSON to stdout when a report can be built. Argument and usage errors may remain normal stderr-only errors.
+
+`verify --recipe-id` is storage-backed preflight only in this phase. It reads from local recipe storage, does not execute HTTP, does not update SQLite, and leaves actual HTTP verification by recipe id as future work.
 
 Actual non-dry-run HTTP `verify --json` is not supported yet.
 
@@ -483,7 +487,7 @@ Open questions:
 
 - Whether future import should record package provenance in SQLite.
 - Whether legacy packages without `package.manifest.json` should be importable behind an explicit flag.
-- Whether future `recipe-export-json`, `verify --recipe-id`, and `package --recipe-id` should expose only safe/redacted recipe fields.
+- Whether future `recipe-export-json`, actual HTTP `verify --recipe-id`, and `package --recipe-id` should expose only safe/redacted recipe fields.
 
 ## Non-Goals
 
