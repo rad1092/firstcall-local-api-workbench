@@ -68,6 +68,23 @@ CLI:
 cargo run --bin firstcall-cli -- version
 ```
 
+CLI command overview:
+
+```text
+firstcall-cli version
+firstcall-cli explain --recipe-json PATH
+firstcall-cli package --recipe-json PATH --out DIR
+firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]
+firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]
+firstcall-cli validate-package --dir PATH [--json]
+firstcall-cli inspect-package --dir PATH [--json]
+firstcall-cli import-package --dir PATH [--data-dir PATH --config-dir PATH] [--json]
+firstcall-cli recipe-list [--data-dir PATH --config-dir PATH] [--json]
+firstcall-cli recipe-show --id ID [--data-dir PATH --config-dir PATH] [--json]
+```
+
+Without `--json`, CLI commands keep human-readable output. With `--json`, report-producing commands emit machine-readable JSON for agents, CI, and scripts. JSON output is for safe/static report surfaces and read-only recipe summaries. Actual non-dry-run HTTP `verify --json` is intentionally not supported yet.
+
 Checks:
 
 ```powershell
@@ -133,10 +150,18 @@ cargo run --bin firstcall-cli -- verify --recipe-json ./recipe.json --dry-run
 ```
 
 ```powershell
+cargo run --bin firstcall-cli -- verify --recipe-json ./recipe.json --dry-run --json
+```
+
+```powershell
 cargo run --bin firstcall-cli -- verify --recipe-json ./recipe.json --preflight
 ```
 
-`verify --dry-run` and `verify --preflight` are aliases. They perform local static/runtime-input preflight only, do not execute HTTP, and do not write `--out` or `--lock-out` files. The report lists required environment variables by name with `set` or `missing` status only, never secret values. Mutating methods still require `--allow-mutating` to be ready for real verification.
+```powershell
+cargo run --bin firstcall-cli -- verify --recipe-json ./recipe.json --preflight --json
+```
+
+`verify --dry-run` and `verify --preflight` are aliases. They perform local static/runtime-input preflight only, do not execute HTTP, and do not write `--out` or `--lock-out` files. Human and JSON reports list required environment variables by name with `set` or `missing` status only, never environment values or raw secrets. Mutating methods still require `--allow-mutating` to be ready for real verification. Actual HTTP verify still uses human-readable output only in this phase.
 
 `verify --dry-run` checks whether a recipe is ready to execute. `validate-package` checks exported package structure and integrity.
 
@@ -195,6 +220,10 @@ Run static validation on the generated package:
 cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool
 ```
 
+```powershell
+cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool --json
+```
+
 `package.manifest.json` records SHA-256 hashes for generated package files. `validate-package` checks package structure, schema metadata, lock metadata, policy shape, MCP template markers including `structuredContent`, `outputSchema`, and tool annotations, obvious secret leaks, and manifest hashes when the manifest is present. Missing `package.manifest.json` currently warns instead of failing for backward compatibility.
 
 `validate-package` is static-only: it does not execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, execute the generated MCP server, import recipes, or modify files. The generated files should not export raw secrets.
@@ -205,12 +234,20 @@ Inspect import-readiness without importing anything:
 cargo run --bin firstcall-cli -- inspect-package --dir ./dist/sample-agent-tool
 ```
 
-`inspect-package` runs `validate-package` and then checks import-readiness conditions such as manifest presence, recipe/policy agreement, and verified lock metadata. It does not import recipes, modify files, modify app storage, execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, or execute the generated MCP server. Missing `package.manifest.json` blocks inspect-readiness even though `validate-package` still warns for backward compatibility. Imported recipes will require local re-verification in a future real import flow.
+```powershell
+cargo run --bin firstcall-cli -- inspect-package --dir ./dist/sample-agent-tool --json
+```
+
+`inspect-package` runs `validate-package` and then checks import-readiness conditions such as manifest presence, recipe/policy agreement, and verified lock metadata. It does not import recipes, modify files, modify app storage, execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, or execute the generated MCP server. Missing `package.manifest.json` blocks inspect-readiness even though `validate-package` still warns for backward compatibility.
 
 Import an inspect-ready package into local FirstCall recipe storage:
 
 ```powershell
 cargo run --bin firstcall-cli -- import-package --dir ./dist/sample-agent-tool
+```
+
+```powershell
+cargo run --bin firstcall-cli -- import-package --dir ./dist/sample-agent-tool --json
 ```
 
 For tests or controlled local imports, storage can be overridden explicitly:
@@ -219,7 +256,57 @@ For tests or controlled local imports, storage can be overridden explicitly:
 cargo run --bin firstcall-cli -- import-package --dir ./dist/sample-agent-tool --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config
 ```
 
+```powershell
+cargo run --bin firstcall-cli -- import-package --dir ./dist/sample-agent-tool --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config --json
+```
+
 `import-package` runs inspect-readiness first, writes one recipe into the existing local SQLite recipe storage, and marks the imported recipe as needing local re-verification. It does not preserve verified status, import raw secrets, execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, execute generated MCP runtime, or use generated `mcp-server/` files as the source of truth.
+
+## Local recipe storage CLI
+
+List local stored recipes:
+
+```powershell
+cargo run --bin firstcall-cli -- recipe-list
+```
+
+```powershell
+cargo run --bin firstcall-cli -- recipe-list --json
+```
+
+Show one local stored recipe:
+
+```powershell
+cargo run --bin firstcall-cli -- recipe-show --id 1
+```
+
+```powershell
+cargo run --bin firstcall-cli -- recipe-show --id 1 --json
+```
+
+Controlled storage examples:
+
+```powershell
+cargo run --bin firstcall-cli -- recipe-list --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config
+```
+
+```powershell
+cargo run --bin firstcall-cli -- recipe-show --id 1 --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config --json
+```
+
+`recipe-list` and `recipe-show` are read-only recipe summary commands over local FirstCall SQLite recipe storage. When overriding storage, `--data-dir` and `--config-dir` must be provided together. Output is intentionally safe: it does not include `RuntimeSlot.current_value`, raw secrets, environment values, resolved secret-bearing URLs, or body contents. URL templates are sanitized. Imported recipes normally show `requires_local_re_verification: true` until verified locally.
+
+## Agent and CI workflow
+
+Agents and CI should parse stdout JSON and treat a non-zero exit status as blocked or failed:
+
+```powershell
+cargo run --bin firstcall-cli -- package --recipe-json fixtures/verified-agent-recipe.json --out ./dist/sample-agent-tool
+cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool --json
+cargo run --bin firstcall-cli -- inspect-package --dir ./dist/sample-agent-tool --json
+cargo run --bin firstcall-cli -- import-package --dir ./dist/sample-agent-tool --json
+cargo run --bin firstcall-cli -- recipe-list --json
+```
 
 ## CI
 
@@ -263,6 +350,10 @@ Each runner executes:
 - `src/merge/*`: source precedence and candidate merge rules
 - `src/exec/*`: request execution, classification, validation, redaction
 - `src/store/*`: SQLite migrations/repos and secret storage abstraction
+- `src/bin/firstcall-cli.rs`: CLI surface for verify, package, validate, inspect, import, and recipe storage commands
 - `src/export/*`: curl, markdown, and JSON recipe export
 - `src/export/agent_*`, `src/export/policy.rs`, `src/export/skill.rs`, `src/export/mcp_ts.rs`: verified agent recipe package export
+- `src/export/package_validation.rs`: static generated package validation
+- `src/export/package_inspect.rs`: import-readiness inspection
+- `src/export/package_import.rs`: inspect-gated package import into local recipe storage
 - `fixtures/*`: sample manual test inputs

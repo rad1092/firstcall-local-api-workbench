@@ -2,11 +2,11 @@
 
 ## Purpose
 
-This document defines the exported FirstCall Agent Recipe package format and the proposed import-readiness policy for future phases.
+This document defines the exported FirstCall Agent Recipe package format and the current CLI import-readiness policy.
 
 FirstCall Agent Recipes packages are produced after a real local verification succeeds. The package format is local-first, redacted, environment-variable-backed, and intended to be useful to coding agents without becoming a cloud service or a marketplace format.
 
-This document is a schema and design reference. `firstcall-cli inspect-package` can report import-readiness, and `firstcall-cli import-package` can import inspect-ready packages into local recipe storage. Recipe YAML import and desktop UI import do not exist today.
+This document is a schema and design reference. `firstcall-cli validate-package`, `firstcall-cli inspect-package`, and `firstcall-cli import-package` exist today. `recipe-list` and `recipe-show` expose safe read-only summaries from local recipe storage. Recipe YAML-only import and desktop UI import do not exist today.
 
 ## Package Root Layout
 
@@ -382,7 +382,7 @@ Examples of errors:
 - Manifest hash mismatch.
 - Policy allows guarded mutating methods without confirmation.
 
-Future import should be stricter than current validation: missing `package.manifest.json` may remain a validation warning for legacy packages, but import should require it by default or require an explicit future legacy override.
+Import-readiness is stricter than current validation: missing `package.manifest.json` may remain a validation warning for legacy packages, but `inspect-package` and `import-package` block readiness by default.
 
 ## Secret Handling Rules
 
@@ -427,43 +427,63 @@ Verification is local. The user supplies secrets through environment variables. 
 
 Local loopback verification tests are allowed. External live HTTP tests are not required for Rust tests.
 
+## Machine-Readable CLI Reports
+
+Several CLI surfaces support `--json` for agents, CI, and scripts:
+
+- `firstcall-cli validate-package --dir PATH --json`
+- `firstcall-cli inspect-package --dir PATH --json`
+- `firstcall-cli import-package --dir PATH --json`
+- `firstcall-cli verify --recipe-json PATH --dry-run --json`
+- `firstcall-cli verify --recipe-json PATH --preflight --json`
+- `firstcall-cli recipe-list --json`
+- `firstcall-cli recipe-show --id ID --json`
+
+JSON reports use safe, sanitized fields. Environment variable names may appear, but environment variable values and raw secrets must not appear. Blocked report states should still emit parseable JSON to stdout when a report can be built. Argument and usage errors may remain normal stderr-only errors.
+
+Actual non-dry-run HTTP `verify --json` is not supported yet.
+
 ## Import-Readiness Policy
 
 `firstcall-cli inspect-package --dir PATH` implements a static import-readiness report. It does not import packages, persist recipes, modify app storage, execute HTTP, or run generated MCP tooling.
+
+`firstcall-cli import-package --dir PATH` imports inspect-ready package directories into local SQLite recipe storage. It clears verification metadata during conversion, so imported recipes require local re-verification. It does not import raw secrets, execute HTTP, run generated MCP tooling, or use generated `mcp-server/` files as source of truth.
 
 Actual desktop UI import remains design-only. The CLI import flow is package-directory-based and only runs after inspect-readiness succeeds.
 
 Current CLI import and future desktop import decisions:
 
-- Import should be package-directory-based, not `recipe.yaml`-only.
-- Import should run `validate-package` first.
-- Import should require validation success.
-- Missing `package.manifest.json` may remain a validation warning for legacy packages, but import should require `package.manifest.json` by default or require an explicit future `--allow-legacy` flag.
-- Imported recipes should be marked as needing local re-verification unless the product explicitly decides to trust `verified.lock.json`.
+- Import is package-directory-based, not `recipe.yaml`-only.
+- Import runs `validate-package` first through inspect-readiness.
+- Import requires validation success and inspect-readiness success.
+- Missing `package.manifest.json` may remain a validation warning for legacy packages, but import requires `package.manifest.json` by default.
+- Imported recipes are marked as needing local re-verification.
 - Raw secrets must never be imported.
 - Imported auth must remain environment-variable-backed.
 - If `policy.json` and `recipe.yaml` disagree, import should block.
-- If `verified.lock.json` fingerprint does not match the package recipe content, import should block.
+- Full request fingerprint recomputation is deferred, but malformed `verified.lock.json` fingerprint fields block readiness.
 - Generated `mcp-server/` files should be treated as artifacts, not source of truth.
 - Import should not execute HTTP.
 - Import should not run npm, TypeScript, Node, MCP Inspector, or generated MCP runtime.
 - Import should not modify files outside the intended local app storage path.
-- Import should provide a clear dry-run/readiness report before actual persistence.
-- `firstcall-cli import-package` imports into existing local SQLite recipe storage and clears verification metadata so the imported recipe needs local re-verification.
+- Inspect provides a clear readiness report before import persistence.
+- `recipe-list` and `recipe-show` provide safe read-only summaries from local SQLite recipe storage.
 
 ## Open Questions and Future Phases
 
-Phase 4B defines `firstcall-cli inspect-package --dir PATH` as an import-readiness CLI surface. It reports whether a package is import-ready without modifying app storage.
+Phase 4B `inspect-package` is complete.
 
-Phase 4C adds `firstcall-cli import-package` for CLI-only package import after schema, validation, and inspect-readiness behavior are stable.
+Phase 4C `import-package` is complete.
 
-Desktop UI integration should wait until the CLI contract is stable.
+Phase 5A JSON reports and safe read-only recipe storage CLI are present.
+
+Desktop UI integration should still wait until the CLI contract is stable.
 
 Open questions:
 
-- Whether future import trusts `verified.lock.json` or always marks recipes as needing local re-verification.
+- Whether future import should record package provenance in SQLite.
 - Whether legacy packages without `package.manifest.json` should be importable behind an explicit flag.
-- How to represent imported package provenance in local SQLite without changing the current schema too early.
+- Whether future `recipe-export-json`, `verify --recipe-id`, and `package --recipe-id` should expose only safe/redacted recipe fields.
 
 ## Non-Goals
 

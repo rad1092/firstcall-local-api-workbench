@@ -10,12 +10,13 @@ use firstcall::export::package_inspect::{PackageInspectReport, inspect_agent_pac
 use firstcall::export::package_validation::{PackageValidationReport, validate_agent_package_dir};
 use firstcall::export::verified_lock::recipe_to_verified_lock_json;
 use firstcall::model::Recipe;
-use firstcall::store::db::{AppPaths, open_database};
+use firstcall::store::db::AppPaths;
 use firstcall::store::repos::AppRepository;
 use firstcall::verify::{
     VerifyOptions, VerifyPreflightReport, VerifyReport, verify_recipe_preflight_with_process_env,
     verify_recipe_with_process_env,
 };
+use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 
 fn main() {
@@ -156,8 +157,10 @@ fn run() -> Result<()> {
         "recipe-list" => {
             let json_output = has_flag(&args[1..], "--json");
             let paths = storage_paths_from_args(&args[1..])?;
-            let repository = AppRepository::new(open_database(&paths)?);
-            let recipes = recipe_summaries(&repository)?;
+            let recipes = match open_existing_recipe_repository(&paths)? {
+                Some(repository) => recipe_summaries(&repository)?,
+                None => Vec::new(),
+            };
             if json_output {
                 print_recipe_list_json(&recipes)?;
             } else {
@@ -169,8 +172,10 @@ fn run() -> Result<()> {
             let recipe_id = required_i64_arg(&args[1..], "--id")?;
             let json_output = has_flag(&args[1..], "--json");
             let paths = storage_paths_from_args(&args[1..])?;
-            let repository = AppRepository::new(open_database(&paths)?);
-            let recipe = repository.get_recipe(recipe_id)?;
+            let recipe = match open_existing_recipe_repository(&paths)? {
+                Some(repository) => repository.get_recipe(recipe_id)?,
+                None => None,
+            };
             if let Some(recipe) = recipe {
                 let summary = recipe_summary(recipe_id, &recipe);
                 if json_output {
@@ -573,6 +578,25 @@ fn recipe_summaries(repository: &AppRepository) -> Result<Vec<RecipeSummary>> {
             Ok(recipe_summary(item.id, &recipe))
         })
         .collect()
+}
+
+fn open_existing_recipe_repository(paths: &AppPaths) -> Result<Option<AppRepository>> {
+    if !paths.db_path.exists() {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(
+        &paths.db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| {
+        format!(
+            "Could not open existing recipe database {}",
+            paths.db_path.display()
+        )
+    })?;
+    Ok(Some(AppRepository::new(connection)))
 }
 
 fn recipe_summary(id: i64, recipe: &Recipe) -> RecipeSummary {

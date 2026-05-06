@@ -11,6 +11,77 @@ use tempfile::{TempDir, tempdir};
 const RAW_SECRET: &str = "sk_test_raw_secret_123";
 
 #[test]
+fn recipe_list_human_on_missing_storage_is_empty_without_creating_db() {
+    let storage = fresh_storage_paths();
+
+    let output = cli()
+        .args(["recipe-list", "--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(output.status.success(), "{combined}");
+    assert!(combined.contains("Mode: recipe-list"));
+    assert!(combined.contains("Recipes: 0"));
+    assert!(!storage.paths.db_path.exists());
+    assert!(!storage.data_dir.exists());
+    assert!(!storage.config_dir.exists());
+    assert!(!combined.contains(RAW_SECRET));
+}
+
+#[test]
+fn recipe_list_json_on_missing_storage_is_empty_without_creating_db() {
+    let storage = fresh_storage_paths();
+
+    let output = cli()
+        .args(["recipe-list", "--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(output.status.success(), "{}", combined_output(&output));
+    assert_eq!(report["mode"], "recipe-list");
+    assert!(report["recipes"].as_array().expect("recipes").is_empty());
+    assert!(!storage.paths.db_path.exists());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+}
+
+#[test]
+fn recipe_show_json_on_missing_storage_reports_not_found_without_creating_db() {
+    let storage = fresh_storage_paths();
+    let recipe_id = 42;
+
+    let output = cli()
+        .args(["recipe-show", "--id"])
+        .arg(recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--json"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(!output.status.success());
+    assert_eq!(report["mode"], "recipe-show");
+    assert_eq!(report["status"], "not_found");
+    assert!(report["recipe"].is_null());
+    assert_eq!(report["recipe_id"], recipe_id);
+    assert!(!storage.paths.db_path.exists());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+}
+
+#[test]
 fn recipe_list_human_output_shows_safe_imported_recipe() {
     let storage = import_fixture_package();
 
@@ -196,6 +267,26 @@ struct ImportedStorage {
     data_dir: PathBuf,
     config_dir: PathBuf,
     recipe_id: i64,
+}
+
+struct FreshStorage {
+    _root: TempDir,
+    data_dir: PathBuf,
+    config_dir: PathBuf,
+    paths: AppPaths,
+}
+
+fn fresh_storage_paths() -> FreshStorage {
+    let root = tempdir().expect("tempdir");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    let paths = AppPaths::from_root(&data_dir, &config_dir).expect("paths");
+    FreshStorage {
+        _root: root,
+        data_dir,
+        config_dir,
+        paths,
+    }
 }
 
 fn import_fixture_package() -> ImportedStorage {
