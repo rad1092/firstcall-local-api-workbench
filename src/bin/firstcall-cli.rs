@@ -140,7 +140,7 @@ fn run() -> Result<()> {
                             if json_output {
                                 print_verify_recipe_id_not_found_json(recipe_id)?;
                             } else {
-                                print_verify_recipe_id_not_found_report(recipe_id);
+                                print_verify_recipe_id_not_found_report(recipe_id, "dry-run");
                             }
                             bail!("recipe not found: {recipe_id}");
                         };
@@ -161,11 +161,11 @@ fn run() -> Result<()> {
                     } else {
                         let Some(repository) = open_existing_recipe_repository_for_update(&paths)?
                         else {
-                            print_verify_recipe_id_not_found_report(recipe_id);
+                            print_verify_recipe_id_not_found_report(recipe_id, "verify");
                             bail!("recipe not found: {recipe_id}");
                         };
                         let Some(recipe) = repository.get_recipe(recipe_id)? else {
-                            print_verify_recipe_id_not_found_report(recipe_id);
+                            print_verify_recipe_id_not_found_report(recipe_id, "verify");
                             bail!("recipe not found: {recipe_id}");
                         };
                         match verify_recipe_with_process_env(
@@ -464,9 +464,9 @@ fn verify_preflight_json_value(report: &VerifyPreflightReport) -> Value {
     })
 }
 
-fn print_verify_recipe_id_not_found_report(recipe_id: i64) {
+fn print_verify_recipe_id_not_found_report(recipe_id: i64, mode: &str) {
     println!("Product: FirstCall Agent Recipes");
-    println!("Mode: dry-run");
+    println!("Mode: {mode}");
     println!("Source: recipe-id");
     println!("Recipe id: {recipe_id}");
     println!("Status: not_found");

@@ -163,7 +163,7 @@ cargo run --bin firstcall-cli -- verify --recipe-json ./recipe.json --preflight
 cargo run --bin firstcall-cli -- verify --recipe-json ./recipe.json --preflight --json
 ```
 
-Run the same preflight against a recipe already in local recipe storage:
+Verify or preflight a recipe already in local recipe storage:
 
 ```powershell
 cargo run --bin firstcall-cli -- verify --recipe-id 1

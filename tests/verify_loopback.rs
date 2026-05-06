@@ -475,10 +475,43 @@ fn cli_verify_recipe_id_missing_storage_does_not_create_database() {
 
     assert!(!output.status.success());
     assert!(combined.contains("Status: not_found") || combined.contains("recipe not found"));
+    assert!(combined.contains("Mode: verify"));
+    assert!(!combined.contains("Mode: dry-run"));
     assert!(!paths.db_path.exists());
     assert!(!data_dir.exists());
     assert!(!config_dir.exists());
     assert_no_raw_secret(&combined);
+}
+
+#[test]
+fn cli_verify_recipe_id_missing_recipe_is_not_dry_run_labeled_and_does_not_hit_network() {
+    let server = spawn_no_request_http_server();
+    let storage = store_recipe(&no_auth_recipe("GET", &server.base_url));
+    let missing_id = storage.recipe_id + 1000;
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(missing_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .output()
+        .expect("run cli");
+    let captured = server.join();
+    let combined = combined_output(&output);
+
+    assert_eq!(captured.requests_received, 0);
+    assert!(captured.request_text.is_none());
+    assert!(!output.status.success());
+    assert!(combined.contains("Status: not_found") || combined.contains("recipe not found"));
+    assert!(combined.contains("Mode: verify"));
+    assert!(!combined.contains("Mode: dry-run"));
+    assert_no_raw_secret(&combined);
+
+    let stored = read_stored_recipe(&storage);
+    assert!(stored.last_success_at.is_none());
+    assert_eq!(stored.last_success_status, None);
 }
 
 #[test]
