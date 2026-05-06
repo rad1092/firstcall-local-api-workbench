@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chrono::{DateTime, Utc};
@@ -11,8 +11,10 @@ use firstcall::model::{
     AuthStyle, BodyTemplate, Confidence, HeaderField, KeyValueField, Recipe, RuntimeSlot,
     SlotLocation,
 };
+use firstcall::store::db::{AppPaths, open_database};
+use firstcall::store::repos::AppRepository;
 use serde_json::Value;
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 
 const RAW_SECRET: &str = "sk_test_raw_secret_123";
 const RAW_QUERY_SECRET: &str = "raw_secret_123";
@@ -403,6 +405,251 @@ fn cli_package_rejects_non_2xx_verified_recipe_without_raw_secret() {
 }
 
 #[test]
+fn cli_package_recipe_id_exports_verified_stored_recipe_without_raw_secrets() {
+    let storage = store_recipe(&fake_recipe(
+        "GET",
+        "https://api.example.com/users/{{user_id}}",
+    ));
+    let out_dir = storage.root.path().join("agent-package");
+
+    let output = cli()
+        .args(["package", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--out"])
+        .arg(&out_dir)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(output.status.success(), "{combined}");
+    assert!(combined.contains("Exported agent package to"));
+    assert_agent_package_files(&out_dir);
+    assert_no_raw_secret(&combined);
+    for content in read_all_files(&out_dir) {
+        assert_no_raw_secret(&content);
+    }
+}
+
+#[test]
+fn cli_package_recipe_id_uses_stored_payload_not_summary_columns() {
+    let mut original = fake_recipe("GET", "https://api.example.com/original/{{user_id}}");
+    original.name = "Original Recipe".to_string();
+    let storage = store_recipe(&original);
+
+    let mut verified_payload = fake_recipe("POST", "https://api.example.com/updated/{{user_id}}");
+    verified_payload.name = "Updated Payload Recipe".to_string();
+    let repository = AppRepository::new(open_database(&storage.paths).expect("db"));
+    repository
+        .update_recipe_verification(storage.recipe_id, &verified_payload)
+        .expect("update payload");
+
+    let out_dir = storage.root.path().join("payload-package");
+    let output = cli()
+        .args(["package", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--out"])
+        .arg(&out_dir)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(output.status.success(), "{combined}");
+    let yaml = fs::read_to_string(out_dir.join("recipe.yaml")).expect("yaml");
+    assert!(yaml.contains("name: updated_payload_recipe"));
+    assert!(yaml.contains("method: POST"));
+    assert!(yaml.contains("https://api.example.com/updated/${user_id}"));
+    assert!(!yaml.contains("original_recipe"));
+    assert!(!yaml.contains("https://api.example.com/original"));
+    assert_no_raw_secret(&combined);
+    for content in read_all_files(&out_dir) {
+        assert_no_raw_secret(&content);
+    }
+}
+
+#[test]
+fn cli_package_recipe_id_rejects_missing_storage_without_creating_db_or_output() {
+    let root = tempdir().expect("tempdir");
+    let data_dir = root.path().join("missing-data");
+    let config_dir = root.path().join("missing-config");
+    let paths = AppPaths::from_root(&data_dir, &config_dir).expect("paths");
+    let out_dir = root.path().join("agent-package");
+
+    let output = cli()
+        .args(["package", "--recipe-id", "42", "--data-dir"])
+        .arg(&data_dir)
+        .args(["--config-dir"])
+        .arg(&config_dir)
+        .args(["--out"])
+        .arg(&out_dir)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains("recipe not found: 42"));
+    assert!(!paths.db_path.exists());
+    assert!(!data_dir.exists());
+    assert!(!config_dir.exists());
+    assert!(!out_dir.exists());
+    assert_no_raw_secret(&combined);
+}
+
+#[test]
+fn cli_package_recipe_id_rejects_missing_recipe_without_output_or_mutation() {
+    let mut recipe = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    recipe.name = "Stored Recipe".to_string();
+    let storage = store_recipe(&recipe);
+    let missing_id = storage.recipe_id + 1000;
+    let out_dir = storage.root.path().join("agent-package");
+
+    let output = cli()
+        .args(["package", "--recipe-id"])
+        .arg(missing_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--out"])
+        .arg(&out_dir)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains(&format!("recipe not found: {missing_id}")));
+    assert!(!out_dir.exists());
+    let stored = read_stored_recipe(&storage);
+    assert_eq!(stored.name, "Stored Recipe");
+    assert_eq!(stored.last_success_status, Some(200));
+    assert_no_raw_secret(&combined);
+}
+
+#[test]
+fn cli_package_recipe_id_rejects_unverified_stored_recipe() {
+    let mut recipe = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    recipe.last_success_at = None;
+    recipe.last_success_status = None;
+    let storage = store_recipe(&recipe);
+    let out_dir = storage.root.path().join("agent-package");
+
+    let output = cli()
+        .args(["package", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--out"])
+        .arg(&out_dir)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains("not eligible for agent export"));
+    assert!(!out_dir.exists());
+    assert_no_raw_secret(&combined);
+}
+
+#[test]
+fn cli_package_recipe_id_rejects_non_2xx_stored_recipe() {
+    let mut recipe = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    recipe.last_success_status = Some(500);
+    let storage = store_recipe(&recipe);
+    let out_dir = storage.root.path().join("agent-package");
+
+    let output = cli()
+        .args(["package", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--out"])
+        .arg(&out_dir)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains("not eligible for agent export"));
+    assert!(!out_dir.exists());
+    assert_no_raw_secret(&combined);
+}
+
+#[test]
+fn cli_package_source_validation_rejects_invalid_sources_without_output() {
+    let root = tempdir().expect("tempdir");
+    let out_without_source = root.path().join("out-without-source");
+    let output = cli()
+        .args(["package", "--out"])
+        .arg(&out_without_source)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+    assert!(!output.status.success());
+    assert!(combined.contains("exactly one of --recipe-json or --recipe-id is required"));
+    assert!(!out_without_source.exists());
+    assert_no_raw_secret(&combined);
+
+    let out_with_both = root.path().join("out-with-both");
+    let output = cli()
+        .args([
+            "package",
+            "--recipe-json",
+            "fixtures/verified-agent-recipe.json",
+            "--recipe-id",
+            "1",
+            "--out",
+        ])
+        .arg(&out_with_both)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+    assert!(!output.status.success());
+    assert!(combined.contains("provide only one of --recipe-json or --recipe-id"));
+    assert!(!out_with_both.exists());
+    assert_no_raw_secret(&combined);
+
+    let data_dir = root.path().join("data-only");
+    let out_data_only = root.path().join("out-data-only");
+    let output = cli()
+        .args(["package", "--recipe-id", "42", "--data-dir"])
+        .arg(&data_dir)
+        .args(["--out"])
+        .arg(&out_data_only)
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+    assert!(!output.status.success());
+    assert!(combined.contains("--data-dir and --config-dir must be provided together"));
+    assert!(!data_dir.exists());
+    assert!(!out_data_only.exists());
+    assert_no_raw_secret(&combined);
+}
+
+#[test]
+fn cli_help_includes_package_recipe_id_usage() {
+    let output = cli().output().expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains("firstcall-cli package --recipe-json PATH --out DIR"));
+    assert!(combined.contains(
+        "firstcall-cli package --recipe-id ID --out DIR [--data-dir PATH --config-dir PATH]"
+    ));
+    assert_no_raw_secret(&combined);
+}
+
+#[test]
 fn text_only_golden_agent_package_uses_safe_templates() {
     let mut recipe = basic_auth_recipe();
     recipe.url_template =
@@ -449,6 +696,77 @@ fn text_only_golden_agent_package_uses_safe_templates() {
         RAW_BASIC_PASSWORD,
     ] {
         assert!(!combined.contains(secret), "leaked {secret}");
+    }
+}
+
+struct StoredRecipe {
+    root: TempDir,
+    data_dir: PathBuf,
+    config_dir: PathBuf,
+    paths: AppPaths,
+    recipe_id: i64,
+}
+
+fn store_recipe(recipe: &Recipe) -> StoredRecipe {
+    let root = tempdir().expect("tempdir");
+    let data_dir = root.path().join("data");
+    let config_dir = root.path().join("config");
+    let paths = AppPaths::from_root(&data_dir, &config_dir).expect("paths");
+    let repository = AppRepository::new(open_database(&paths).expect("db"));
+    let recipe_id = repository.insert_recipe(recipe).expect("insert recipe");
+    StoredRecipe {
+        root,
+        data_dir,
+        config_dir,
+        paths,
+        recipe_id,
+    }
+}
+
+fn read_stored_recipe(storage: &StoredRecipe) -> Recipe {
+    let repository = AppRepository::new(open_database(&storage.paths).expect("db"));
+    repository
+        .get_recipe(storage.recipe_id)
+        .expect("get recipe")
+        .expect("stored recipe")
+}
+
+fn cli() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_firstcall-cli"))
+}
+
+fn combined_output(output: &std::process::Output) -> String {
+    format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn assert_agent_package_files(root: &Path) {
+    for relative in [
+        "recipe.yaml",
+        "verified.lock.json",
+        "skill.md",
+        "policy.json",
+        "package.manifest.json",
+        "mcp-server/package.json",
+        "mcp-server/tsconfig.json",
+        "mcp-server/src/server.ts",
+        "mcp-server/README.md",
+    ] {
+        assert!(root.join(relative).exists(), "missing {relative}");
+    }
+}
+
+fn assert_no_raw_secret(text: &str) {
+    for secret in [
+        RAW_SECRET,
+        RAW_QUERY_SECRET,
+        RAW_BASIC_USERNAME,
+        RAW_BASIC_PASSWORD,
+    ] {
+        assert!(!text.contains(secret), "leaked {secret}");
     }
 }
 

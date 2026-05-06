@@ -44,9 +44,27 @@ fn run() -> Result<()> {
             Ok(())
         }
         "package" => {
-            let recipe_json = required_path_arg(&args[1..], "--recipe-json")?;
+            let recipe_json = optional_path_arg(&args[1..], "--recipe-json");
+            let recipe_id = optional_i64_arg(&args[1..], "--recipe-id")?;
             let out_dir = required_path_arg(&args[1..], "--out")?;
-            let recipe = read_recipe_json(&recipe_json)?;
+            let source = match (recipe_json, recipe_id) {
+                (Some(path), None) => PackageSource::RecipeJson(path),
+                (None, Some(id)) => PackageSource::RecipeId(id),
+                (None, None) => bail!("exactly one of --recipe-json or --recipe-id is required"),
+                (Some(_), Some(_)) => bail!("provide only one of --recipe-json or --recipe-id"),
+            };
+            let recipe = match source {
+                PackageSource::RecipeJson(recipe_json) => read_recipe_json(&recipe_json)?,
+                PackageSource::RecipeId(recipe_id) => {
+                    let paths = storage_paths_from_args(&args[1..])?;
+                    let Some(repository) = open_existing_recipe_repository(&paths)? else {
+                        bail!("recipe not found: {recipe_id}");
+                    };
+                    repository
+                        .get_recipe(recipe_id)?
+                        .with_context(|| format!("recipe not found: {recipe_id}"))?
+                }
+            };
             export_agent_package(&recipe, &out_dir)?;
             println!("Exported agent package to {}", out_dir.display());
             Ok(())
@@ -957,6 +975,7 @@ fn print_help() {
   firstcall-cli version
   firstcall-cli explain --recipe-json PATH
   firstcall-cli package --recipe-json PATH --out DIR
+  firstcall-cli package --recipe-id ID --out DIR [--data-dir PATH --config-dir PATH]
   firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]
   firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]
   firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating]
@@ -967,6 +986,11 @@ fn print_help() {
   firstcall-cli recipe-list [--data-dir PATH --config-dir PATH] [--json]
   firstcall-cli recipe-show --id ID [--data-dir PATH --config-dir PATH] [--json]"
     );
+}
+
+enum PackageSource {
+    RecipeJson(PathBuf),
+    RecipeId(i64),
 }
 
 enum VerifySource {

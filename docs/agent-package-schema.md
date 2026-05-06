@@ -6,7 +6,7 @@ This document defines the exported FirstCall Agent Recipe package format and the
 
 FirstCall Agent Recipes packages are produced after a real local verification succeeds. The package format is local-first, redacted, environment-variable-backed, and intended to be useful to coding agents without becoming a cloud service or a marketplace format.
 
-This document is a schema and design reference. `firstcall-cli validate-package`, `firstcall-cli inspect-package`, and `firstcall-cli import-package` exist today. `recipe-list` and `recipe-show` expose safe read-only summaries from local recipe storage. Recipe YAML-only import and desktop UI import do not exist today.
+This document is a schema and design reference. `firstcall-cli validate-package`, `firstcall-cli inspect-package`, and `firstcall-cli import-package` exist today. `recipe-list` and `recipe-show` expose safe read-only summaries from local recipe storage. `package --recipe-id` can export a successfully verified stored recipe into the same redacted package format as `package --recipe-json`. Recipe YAML-only import and desktop UI import do not exist today.
 
 ## Package Root Layout
 
@@ -427,6 +427,8 @@ Verification is local. The user supplies secrets through environment variables. 
 
 Local loopback verification tests are allowed. External live HTTP tests are not required for Rust tests.
 
+`firstcall-cli package --recipe-id ID --out DIR` reads from local SQLite recipe storage and exports only when the stored recipe payload has successful local verification metadata. It does not execute HTTP, mutate SQLite, import packages, or run generated MCP tooling. It uses the stored recipe payload as source of truth and emits the same redacted agent package format as `package --recipe-json`.
+
 ## Machine-Readable CLI Reports
 
 Several CLI surfaces support `--json` for agents, CI, and scripts:
@@ -487,7 +489,7 @@ Open questions:
 
 - Whether future import should record package provenance in SQLite.
 - Whether legacy packages without `package.manifest.json` should be importable behind an explicit flag.
-- Whether future `recipe-export-json` and `package --recipe-id` should expose only safe/redacted recipe fields.
+- Whether future `recipe-export-json` should expose only safe/redacted recipe fields.
 
 ## Non-Goals
 

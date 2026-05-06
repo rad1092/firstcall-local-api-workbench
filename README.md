@@ -74,6 +74,7 @@ CLI command overview:
 firstcall-cli version
 firstcall-cli explain --recipe-json PATH
 firstcall-cli package --recipe-json PATH --out DIR
+firstcall-cli package --recipe-id ID --out DIR [--data-dir PATH --config-dir PATH]
 firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]
 firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]
 firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating]
@@ -132,6 +133,24 @@ cargo run --bin firstcall-cli -- package `
   --recipe-json ./recipe.json `
   --out ./dist/my-agent-tool
 ```
+
+Package a verified recipe from local recipe storage:
+
+```powershell
+cargo run --bin firstcall-cli -- package `
+  --recipe-id 1 `
+  --out ./dist/my-agent-tool
+```
+
+```powershell
+cargo run --bin firstcall-cli -- package `
+  --recipe-id 1 `
+  --data-dir ./tmp/firstcall-data `
+  --config-dir ./tmp/firstcall-config `
+  --out ./dist/my-agent-tool
+```
+
+`package --recipe-id` reads the stored recipe payload from local SQLite storage. It does not execute HTTP, does not mutate SQLite, and requires successful local verification metadata before export. It emits the same redacted agent package format as `package --recipe-json`; generated `mcp-server/` files remain template artifacts, not source of truth.
 
 Re-run a recipe locally to refresh verification metadata:
 
@@ -209,7 +228,7 @@ dist/sample-agent-tool/
     README.md
 ```
 
-This packages an already-verified recipe JSON. It does not execute an HTTP request, does not verify npm or TypeScript compilation, and does not export raw secrets.
+This packages an already-verified recipe JSON or stored recipe. It does not execute an HTTP request, mutate SQLite during package export, verify npm or TypeScript compilation, or export raw secrets.
 
 The generated MCP server is a template artifact. It returns `structuredContent` in addition to text content, declares an `outputSchema` for `status`, `ok`, and `body_preview`, and includes advisory tool annotations such as `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`. These annotations are hints only; they are not security controls. Rust tests do not run live HTTP verification, `npm install`, `npm build`, TypeScript compilation, Node, MCP Inspector, or the generated MCP runtime.
 
