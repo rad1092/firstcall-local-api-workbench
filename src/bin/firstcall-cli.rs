@@ -10,7 +10,8 @@ use firstcall::export::package_inspect::{PackageInspectReport, inspect_agent_pac
 use firstcall::export::package_validation::{PackageValidationReport, validate_agent_package_dir};
 use firstcall::export::verified_lock::recipe_to_verified_lock_json;
 use firstcall::model::Recipe;
-use firstcall::store::db::AppPaths;
+use firstcall::store::db::{AppPaths, open_database};
+use firstcall::store::repos::AppRepository;
 use firstcall::verify::{
     VerifyOptions, VerifyPreflightReport, VerifyReport, verify_recipe_preflight_with_process_env,
     verify_recipe_with_process_env,
@@ -138,14 +139,8 @@ fn run() -> Result<()> {
         }
         "import-package" => {
             let package_dir = required_path_arg(&args[1..], "--dir")?;
-            let data_dir = optional_path_arg(&args[1..], "--data-dir");
-            let config_dir = optional_path_arg(&args[1..], "--config-dir");
             let json_output = has_flag(&args[1..], "--json");
-            let paths = match (data_dir, config_dir) {
-                (Some(data_dir), Some(config_dir)) => AppPaths::from_root(&data_dir, &config_dir)?,
-                (None, None) => AppPaths::discover()?,
-                _ => bail!("--data-dir and --config-dir must be provided together"),
-            };
+            let paths = storage_paths_from_args(&args[1..])?;
             let report = import_agent_package_dir(&package_dir, &paths)?;
             if json_output {
                 print_package_import_json(&report)?;
@@ -156,6 +151,41 @@ fn run() -> Result<()> {
                 Ok(())
             } else {
                 bail!("package import blocked")
+            }
+        }
+        "recipe-list" => {
+            let json_output = has_flag(&args[1..], "--json");
+            let paths = storage_paths_from_args(&args[1..])?;
+            let repository = AppRepository::new(open_database(&paths)?);
+            let recipes = recipe_summaries(&repository)?;
+            if json_output {
+                print_recipe_list_json(&recipes)?;
+            } else {
+                print_recipe_list_report(&recipes);
+            }
+            Ok(())
+        }
+        "recipe-show" => {
+            let recipe_id = required_i64_arg(&args[1..], "--id")?;
+            let json_output = has_flag(&args[1..], "--json");
+            let paths = storage_paths_from_args(&args[1..])?;
+            let repository = AppRepository::new(open_database(&paths)?);
+            let recipe = repository.get_recipe(recipe_id)?;
+            if let Some(recipe) = recipe {
+                let summary = recipe_summary(recipe_id, &recipe);
+                if json_output {
+                    print_recipe_show_json(Some(&summary), recipe_id)?;
+                } else {
+                    print_recipe_show_report(Some(&summary), recipe_id);
+                }
+                Ok(())
+            } else {
+                if json_output {
+                    print_recipe_show_json(None, recipe_id)?;
+                } else {
+                    print_recipe_show_report(None, recipe_id);
+                }
+                bail!("recipe not found: {recipe_id}")
             }
         }
         _ => {
@@ -510,6 +540,202 @@ fn print_package_import_json(report: &PackageImportReport) -> Result<()> {
     }))
 }
 
+#[derive(Clone, Debug)]
+struct RecipeSummary {
+    id: i64,
+    name: String,
+    method: String,
+    url_template: String,
+    auth_style: String,
+    last_success_status: Option<u16>,
+    last_success_at: Option<String>,
+    requires_local_re_verification: bool,
+    slots: Vec<SlotSummary>,
+}
+
+#[derive(Clone, Debug)]
+struct SlotSummary {
+    name: String,
+    location: String,
+    required: bool,
+    description: String,
+    confidence: String,
+}
+
+fn recipe_summaries(repository: &AppRepository) -> Result<Vec<RecipeSummary>> {
+    repository
+        .list_recipes()?
+        .into_iter()
+        .map(|item| {
+            let recipe = repository
+                .get_recipe(item.id)?
+                .with_context(|| format!("Recipe payload missing for id {}", item.id))?;
+            Ok(recipe_summary(item.id, &recipe))
+        })
+        .collect()
+}
+
+fn recipe_summary(id: i64, recipe: &Recipe) -> RecipeSummary {
+    RecipeSummary {
+        id,
+        name: recipe.name.clone(),
+        method: recipe.method.to_ascii_uppercase(),
+        url_template: sanitized_agent_url_template(recipe),
+        auth_style: recipe.auth_style.label().to_string(),
+        last_success_status: recipe.last_success_status,
+        last_success_at: recipe.last_success_at.map(|value| value.to_rfc3339()),
+        requires_local_re_verification: !has_successful_verification_fields(
+            recipe.last_success_at.is_some(),
+            recipe.last_success_status,
+        ),
+        slots: recipe
+            .slots
+            .iter()
+            .map(|slot| SlotSummary {
+                name: slot.name.clone(),
+                location: slot.location.label().to_string(),
+                required: slot.required,
+                description: slot.description.clone(),
+                confidence: slot.confidence.label().to_string(),
+            })
+            .collect(),
+    }
+}
+
+fn has_successful_verification_fields(has_last_success_at: bool, status: Option<u16>) -> bool {
+    has_last_success_at && matches!(status, Some(200..=299))
+}
+
+fn print_recipe_list_report(recipes: &[RecipeSummary]) {
+    println!("Product: FirstCall Agent Recipes");
+    println!("Mode: recipe-list");
+    println!("Recipes: {}", recipes.len());
+    for recipe in recipes {
+        println!("- ID: {}", recipe.id);
+        println!("  Recipe: {}", recipe.name);
+        println!("  Method: {}", recipe.method);
+        println!("  URL template: {}", recipe.url_template);
+        println!("  Auth style: {}", recipe.auth_style);
+        println!(
+            "  Last successful verification status: {}",
+            optional_status(recipe.last_success_status)
+        );
+        println!(
+            "  Last successful verification time: {}",
+            recipe.last_success_at.as_deref().unwrap_or("n/a")
+        );
+        println!(
+            "  Requires local re-verification: {}",
+            yes_no(recipe.requires_local_re_verification)
+        );
+    }
+}
+
+fn print_recipe_list_json(recipes: &[RecipeSummary]) -> Result<()> {
+    print_json(&json!({
+        "product": "FirstCall Agent Recipes",
+        "mode": "recipe-list",
+        "recipes": recipes.iter().map(|recipe| json!({
+            "id": recipe.id,
+            "name": recipe.name,
+            "method": recipe.method,
+            "url_template": recipe.url_template,
+            "auth_style": recipe.auth_style,
+            "last_success_status": recipe.last_success_status,
+            "last_success_at": recipe.last_success_at,
+            "requires_local_re_verification": recipe.requires_local_re_verification,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+fn print_recipe_show_report(recipe: Option<&RecipeSummary>, recipe_id: i64) {
+    println!("Product: FirstCall Agent Recipes");
+    println!("Mode: recipe-show");
+    println!("Recipe id: {recipe_id}");
+    let Some(recipe) = recipe else {
+        println!("Status: not_found");
+        return;
+    };
+    println!("Recipe: {}", recipe.name);
+    println!("Method: {}", recipe.method);
+    println!("URL template: {}", recipe.url_template);
+    println!("Auth style: {}", recipe.auth_style);
+    println!(
+        "Last successful verification status: {}",
+        optional_status(recipe.last_success_status)
+    );
+    println!(
+        "Last successful verification time: {}",
+        recipe.last_success_at.as_deref().unwrap_or("n/a")
+    );
+    println!(
+        "Requires local re-verification: {}",
+        yes_no(recipe.requires_local_re_verification)
+    );
+    println!("Required slots:");
+    let required_slots = recipe
+        .slots
+        .iter()
+        .filter(|slot| slot.required)
+        .collect::<Vec<_>>();
+    if required_slots.is_empty() {
+        println!("- none");
+    } else {
+        for slot in required_slots {
+            println!(
+                "- {} ({}, {})",
+                slot.name,
+                slot.location,
+                if slot.required {
+                    "required"
+                } else {
+                    "optional"
+                }
+            );
+        }
+    }
+}
+
+fn print_recipe_show_json(recipe: Option<&RecipeSummary>, recipe_id: i64) -> Result<()> {
+    if let Some(recipe) = recipe {
+        print_json(&json!({
+            "product": "FirstCall Agent Recipes",
+            "mode": "recipe-show",
+            "recipe": {
+                "id": recipe.id,
+                "name": recipe.name,
+                "method": recipe.method,
+                "url_template": recipe.url_template,
+                "auth_style": recipe.auth_style,
+                "last_success_status": recipe.last_success_status,
+                "last_success_at": recipe.last_success_at,
+                "requires_local_re_verification": recipe.requires_local_re_verification,
+                "slots": recipe.slots.iter().map(|slot| json!({
+                    "name": slot.name,
+                    "location": slot.location,
+                    "required": slot.required,
+                    "description": slot.description,
+                    "confidence": slot.confidence,
+                })).collect::<Vec<_>>(),
+            },
+        }))
+    } else {
+        print_json(&json!({
+            "product": "FirstCall Agent Recipes",
+            "mode": "recipe-show",
+            "recipe": null,
+            "status": "not_found",
+            "recipe_id": recipe_id,
+        }))
+    }
+}
+
+fn optional_status(status: Option<u16>) -> String {
+    status
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
 fn print_json(value: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -532,15 +758,37 @@ fn has_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
 }
 
+fn required_i64_arg(args: &[String], flag: &str) -> Result<i64> {
+    args.windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| pair[1].parse::<i64>())
+        .transpose()
+        .with_context(|| format!("invalid value for {flag}"))?
+        .with_context(|| format!("missing required argument {flag}"))
+}
+
+fn storage_paths_from_args(args: &[String]) -> Result<AppPaths> {
+    let data_dir = optional_path_arg(args, "--data-dir");
+    let config_dir = optional_path_arg(args, "--config-dir");
+    match (data_dir, config_dir) {
+        (Some(data_dir), Some(config_dir)) => AppPaths::from_root(&data_dir, &config_dir),
+        (None, None) => AppPaths::discover(),
+        _ => bail!("--data-dir and --config-dir must be provided together"),
+    }
+}
+
 fn print_help() {
     eprintln!(
         "Usage:
   firstcall-cli version
   firstcall-cli explain --recipe-json PATH
   firstcall-cli package --recipe-json PATH --out DIR
-  firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating] [--dry-run|--preflight] [--json]
+  firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]
+  firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]
   firstcall-cli validate-package --dir PATH [--json]
   firstcall-cli inspect-package --dir PATH [--json]
-  firstcall-cli import-package --dir PATH [--data-dir PATH --config-dir PATH] [--json]"
+  firstcall-cli import-package --dir PATH [--data-dir PATH --config-dir PATH] [--json]
+  firstcall-cli recipe-list [--data-dir PATH --config-dir PATH] [--json]
+  firstcall-cli recipe-show --id ID [--data-dir PATH --config-dir PATH] [--json]"
     );
 }

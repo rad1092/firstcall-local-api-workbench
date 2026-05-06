@@ -68,6 +68,24 @@ fn verify_dry_run_json_reports_ready_without_network() {
 }
 
 #[test]
+fn verify_json_without_dry_run_or_preflight_is_rejected() {
+    let recipe = no_auth_recipe("GET");
+    let (_dir, recipe_path) = write_recipe(&recipe);
+
+    let output = verify_command()
+        .args(["verify", "--recipe-json"])
+        .arg(&recipe_path)
+        .args(["--json"])
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(combined.contains("--json is only supported with verify --dry-run/--preflight"));
+    assert!(!combined.contains(RAW_SECRET));
+}
+
+#[test]
 fn verify_preflight_alias_reports_ready_without_network() {
     let recipe = no_auth_recipe("GET");
     let (_dir, recipe_path) = write_recipe(&recipe);
@@ -184,6 +202,36 @@ fn verify_dry_run_json_missing_auth_env_reports_without_secret_leak() {
     assert!(!report["blockers"].as_array().expect("blockers").is_empty());
     assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
     assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+}
+
+#[test]
+fn verify_dry_run_json_set_auth_env_does_not_print_value() {
+    let recipe = bearer_recipe("GET");
+    let (_dir, recipe_path) = write_recipe(&recipe);
+
+    let output = verify_command()
+        .args(["verify", "--recipe-json"])
+        .arg(&recipe_path)
+        .args(["--dry-run", "--json"])
+        .env("FIRSTCALL_BEARER_TOKEN", RAW_SECRET)
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(output.status.success(), "{}", combined_output(&output));
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["would_execute_http"], false);
+    assert_eq!(report["preflight_status"], "ready");
+    assert!(
+        report["required_env"]
+            .as_array()
+            .expect("required env")
+            .iter()
+            .any(|item| item["name"] == "FIRSTCALL_BEARER_TOKEN" && item["status"] == "set")
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+    assert!(!report.to_string().contains(RAW_SECRET));
 }
 
 #[test]
