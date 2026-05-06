@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -118,6 +118,30 @@ impl AppRepository {
         Ok(self.connection.last_insert_rowid())
     }
 
+    pub fn update_recipe_verification(&self, id: i64, verified_recipe: &Recipe) -> Result<()> {
+        // This persists verification metadata and the serialized recipe payload only.
+        // It does not redact secrets; callers must pass an already-safe/redacted recipe.
+        // Errors must not include recipe payloads, body contents, resolved secret URLs, or secret values.
+        let payload = serde_json::to_string(verified_recipe)?;
+        let updated = self.connection.execute(
+            "UPDATE recipes
+             SET last_success_at = ?1, last_success_status = ?2, payload_json = ?3
+             WHERE id = ?4",
+            params![
+                verified_recipe
+                    .last_success_at
+                    .map(|value| value.to_rfc3339()),
+                verified_recipe.last_success_status,
+                payload,
+                id,
+            ],
+        )?;
+        if updated == 0 {
+            bail!("recipe not found: {id}");
+        }
+        Ok(())
+    }
+
     pub fn list_recipes(&self) -> Result<Vec<RecipeListItem>> {
         let mut statement = self.connection.prepare(
             "SELECT id, name, method, url_template, last_success_at, last_success_status
@@ -186,11 +210,11 @@ fn parse_blocker(value: &str) -> Blocker {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use tempfile::tempdir;
 
     use crate::model::{
-        AuthStyle, BodyTemplate, Confidence, FieldConfidence, RequestAttempt, RequestDraft,
+        AuthStyle, BodyTemplate, Confidence, FieldConfidence, Recipe, RequestAttempt, RequestDraft,
         ResponseSnapshot, SourceInput, SourceKind,
     };
     use crate::store::db::{AppPaths, open_database};
@@ -257,5 +281,102 @@ mod tests {
         assert!(repo.get_attempt(id).expect("fetch").is_some());
         assert!(!repo.list_attempts().expect("list").is_empty());
         assert_eq!(repo.load_settings().expect("settings").timeout_secs, 30);
+    }
+
+    #[test]
+    fn updates_recipe_verification_metadata_and_payload_for_existing_recipe() {
+        let root = tempdir().expect("tempdir");
+        let paths = AppPaths::from_root(&root.path().join("data"), &root.path().join("config"))
+            .expect("paths");
+        let repo = AppRepository::new(open_database(&paths).expect("db"));
+
+        let original = test_recipe("GET", "https://api.example.com/users/{{user_id}}", None);
+        let id = repo.insert_recipe(&original).expect("insert recipe");
+        let verified_at = fixed_time();
+        let mut verified = test_recipe(
+            "POST",
+            "https://api.example.com/changed/{{user_id}}",
+            Some(verified_at),
+        );
+        verified.name = "Changed payload name".to_string();
+        verified.last_success_status = Some(204);
+
+        repo.update_recipe_verification(id, &verified)
+            .expect("update verification");
+
+        let fetched = repo
+            .get_recipe(id)
+            .expect("fetch recipe")
+            .expect("recipe exists");
+        assert_eq!(fetched.name, "Changed payload name");
+        assert_eq!(fetched.method, "POST");
+        assert_eq!(
+            fetched.url_template,
+            "https://api.example.com/changed/{{user_id}}"
+        );
+        assert_eq!(fetched.last_success_at, Some(verified_at));
+        assert_eq!(fetched.last_success_status, Some(204));
+
+        let summary = repo
+            .list_recipes()
+            .expect("list recipes")
+            .into_iter()
+            .find(|item| item.id == id)
+            .expect("summary");
+        assert_eq!(summary.name, original.name);
+        assert_eq!(summary.method, original.method);
+        assert_eq!(summary.url_template, original.url_template);
+        assert_eq!(summary.last_success_at, Some(verified_at));
+        assert_eq!(summary.last_success_status, Some(204));
+    }
+
+    #[test]
+    fn updating_missing_recipe_returns_error_without_creating_recipe_or_leaking_payload() {
+        const RAW_SECRET: &str = "repo_update_raw_secret_marker";
+
+        let root = tempdir().expect("tempdir");
+        let paths = AppPaths::from_root(&root.path().join("data"), &root.path().join("config"))
+            .expect("paths");
+        let repo = AppRepository::new(open_database(&paths).expect("db"));
+        let recipe = test_recipe(
+            "GET",
+            &format!("https://api.example.com/users?token={RAW_SECRET}"),
+            Some(fixed_time()),
+        );
+
+        let error = repo
+            .update_recipe_verification(404, &recipe)
+            .expect_err("missing recipe should error");
+        let message = format!("{error:#}");
+
+        assert!(message.contains("recipe not found: 404"));
+        assert!(!message.contains(RAW_SECRET));
+        assert!(repo.list_recipes().expect("list recipes").is_empty());
+    }
+
+    fn test_recipe(
+        method: &str,
+        url_template: &str,
+        last_success_at: Option<DateTime<Utc>>,
+    ) -> Recipe {
+        Recipe {
+            id: None,
+            name: "Stored Recipe".to_string(),
+            method: method.to_string(),
+            url_template: url_template.to_string(),
+            headers_template: Vec::new(),
+            query_template: Vec::new(),
+            body_template: BodyTemplate::None,
+            auth_style: AuthStyle::None,
+            slots: Vec::new(),
+            last_success_at,
+            last_success_status: last_success_at.map(|_| 200),
+        }
+    }
+
+    fn fixed_time() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-05-06T00:00:00Z")
+            .expect("fixed time")
+            .with_timezone(&Utc)
     }
 }
