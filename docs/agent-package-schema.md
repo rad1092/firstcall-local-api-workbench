@@ -429,6 +429,22 @@ Local loopback verification tests are allowed. External live HTTP tests are not 
 
 `firstcall-cli package --recipe-id ID --out DIR` reads from local SQLite recipe storage and exports only when the stored recipe payload has successful local verification metadata. It does not execute HTTP, mutate SQLite, import packages, or run generated MCP tooling. It uses the stored recipe payload as source of truth and emits the same redacted agent package format as `package --recipe-json`.
 
+## End-to-End CLI Lifecycle
+
+The supported local-first agent recipe lifecycle is:
+
+1. `package --recipe-json PATH --out DIR` exports a verified recipe JSON into a redacted package.
+2. `validate-package --dir DIR --json` checks package structure and integrity.
+3. `inspect-package --dir DIR --json` checks import-readiness without modifying storage.
+4. `import-package --dir DIR --data-dir DATA --config-dir CONFIG --json` imports one recipe into local SQLite storage and clears verification metadata.
+5. `recipe-list --json` and `recipe-show --json` expose safe summaries without `RuntimeSlot.current_value`, raw secrets, env values, resolved secret-bearing URLs, or body contents.
+6. `verify --recipe-id ID --dry-run --json` checks stored-recipe readiness without HTTP or SQLite mutation.
+7. Actual `verify --recipe-id ID` executes local HTTP and updates SQLite verification metadata only on success.
+8. `package --recipe-id ID --out DIR` exports the stored recipe only after successful local re-verification.
+9. The re-exported package can be validated and inspected with the same package commands.
+
+Generated `mcp-server/` files remain artifacts throughout this lifecycle. They are not import source of truth, and Rust tests do not run generated MCP runtime, npm, Node, TypeScript, MCP Inspector, or external live HTTP.
+
 ## Machine-Readable CLI Reports
 
 Several CLI surfaces support `--json` for agents, CI, and scripts:

@@ -343,6 +343,24 @@ cargo run --bin firstcall-cli -- import-package --dir ./dist/sample-agent-tool -
 cargo run --bin firstcall-cli -- recipe-list --json
 ```
 
+Full local-first lifecycle:
+
+```powershell
+cargo run --bin firstcall-cli -- package --recipe-json ./recipe.verified.json --out ./dist/sample-agent-tool
+cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool --json
+cargo run --bin firstcall-cli -- inspect-package --dir ./dist/sample-agent-tool --json
+cargo run --bin firstcall-cli -- import-package --dir ./dist/sample-agent-tool --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config --json
+cargo run --bin firstcall-cli -- recipe-list --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config --json
+cargo run --bin firstcall-cli -- recipe-show --id 1 --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config --json
+cargo run --bin firstcall-cli -- verify --recipe-id 1 --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config --dry-run --json
+cargo run --bin firstcall-cli -- verify --recipe-id 1 --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config
+cargo run --bin firstcall-cli -- package --recipe-id 1 --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config --out ./dist/reverified-agent-tool
+cargo run --bin firstcall-cli -- validate-package --dir ./dist/reverified-agent-tool --json
+cargo run --bin firstcall-cli -- inspect-package --dir ./dist/reverified-agent-tool --json
+```
+
+`import-package` does not preserve verified status, so imported recipes require local re-verification before `package --recipe-id` can export them. `verify --recipe-id --dry-run` does not execute HTTP or update SQLite. Actual `verify --recipe-id` executes local HTTP and updates SQLite verification metadata only on success. `package --recipe-id` does not execute HTTP or mutate SQLite.
+
 ## CI
 
 GitHub Actions validates:
