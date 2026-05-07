@@ -7,6 +7,12 @@ pub enum SourceKind {
     Curl,
     Docs,
     OpenApi,
+    PostmanCollection,
+    Har,
+    HttpFile,
+    Hurl,
+    Bruno,
+    Graphql,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

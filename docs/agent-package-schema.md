@@ -452,6 +452,8 @@ Several CLI surfaces support `--json` for agents, CI, and scripts:
 - `firstcall-cli validate-package --dir PATH --json`
 - `firstcall-cli inspect-package --dir PATH --json`
 - `firstcall-cli import-package --dir PATH --json`
+- `firstcall-cli verify --recipe-json PATH --json`
+- `firstcall-cli verify --recipe-id ID --json`
 - `firstcall-cli verify --recipe-json PATH --dry-run --json`
 - `firstcall-cli verify --recipe-json PATH --preflight --json`
 - `firstcall-cli verify --recipe-id ID --dry-run --json`
@@ -461,9 +463,15 @@ Several CLI surfaces support `--json` for agents, CI, and scripts:
 
 JSON reports use safe, sanitized fields. Environment variable names may appear, but environment variable values and raw secrets must not appear. Blocked report states should still emit parseable JSON to stdout when a report can be built. Argument and usage errors may remain normal stderr-only errors.
 
-`verify --recipe-id` also supports human-readable actual local verification from local recipe storage. Its `--dry-run` and `--preflight` forms do not execute HTTP or update SQLite. Actual `verify --recipe-id` updates local SQLite verification metadata only after successful verification and does not support `--json`, `--out`, or `--lock-out` in this phase.
+`verify --recipe-id` also supports actual local verification from local recipe storage. Its `--dry-run` and `--preflight` forms do not execute HTTP or update SQLite. Actual `verify --recipe-id` updates local SQLite verification metadata only after successful verification. Its JSON report includes `updated_stored_recipe_verification`; actual recipe-id verification still does not support `--out` or `--lock-out`.
 
-Actual non-dry-run HTTP `verify --json` is not supported yet.
+Actual non-dry-run HTTP `verify --json` reports must not include raw request bodies, raw response bodies, request/response headers, environment values, `RuntimeSlot.current_value`, resolved secret-bearing URLs, raw Authorization values, API keys, cookies, or secret query values.
+
+## Request Source Adapters
+
+FirstCall is adding request source adapters beyond the original `curl`, docs prose, and OpenAPI inputs. The current adapter foundation includes source-kind variants for Postman Collection, HAR, `.http`, Hurl, Bruno, and GraphQL, but only limited Postman Collection v2.1 parsing is implemented in this slice.
+
+The Postman Collection parser is static-only and intentionally not full Postman compatibility. It converts supported request shapes into `RequestDraft` candidates, preserves `{{slot_name}}` placeholders as slots, ignores scripts/tests with notes, and never imports Postman variable values as `RuntimeSlot.current_value`. GraphQL-looking Postman JSON bodies are parsed as normal JSON bodies with a note that GraphQL-specific handling is deferred.
 
 ## Import-Readiness Policy
 

@@ -71,7 +71,7 @@ fn verify_dry_run_json_reports_ready_without_network() {
 }
 
 #[test]
-fn verify_json_without_dry_run_or_preflight_is_rejected() {
+fn verify_recipe_json_actual_json_reports_transport_failure() {
     let recipe = no_auth_recipe("GET");
     let (_dir, recipe_path) = write_recipe(&recipe);
 
@@ -82,9 +82,14 @@ fn verify_json_without_dry_run_or_preflight_is_rejected() {
         .output()
         .expect("run cli");
     let combined = combined_output(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
 
     assert!(!output.status.success());
-    assert!(combined.contains("--json is only supported with verify --dry-run/--preflight"));
+    assert_eq!(report["mode"], "verify");
+    assert_eq!(report["source"], "recipe-json");
+    assert_eq!(report["success"], false);
+    assert_eq!(report["wrote_recipe"], false);
+    assert_eq!(report["wrote_lock"], false);
     assert!(!combined.contains(RAW_SECRET));
 }
 
@@ -506,14 +511,20 @@ fn verify_input_source_validation_for_recipe_id() {
     assert!(!both_combined.contains(RAW_SECRET));
 
     let json_actual_output = verify_command()
-        .args(["verify", "--recipe-id", "1", "--json"])
+        .args(["verify", "--recipe-id", "1", "--json", "--data-dir"])
+        .arg(temp.path().join("missing-data"))
+        .args(["--config-dir"])
+        .arg(temp.path().join("missing-config"))
         .output()
         .expect("run cli");
     let json_actual_combined = combined_output(&json_actual_output);
+    let json_actual_report: Value =
+        serde_json::from_slice(&json_actual_output.stdout).expect("stdout json");
     assert!(!json_actual_output.status.success());
-    assert!(
-        json_actual_combined.contains("--json is only supported with verify --dry-run/--preflight")
-    );
+    assert_eq!(json_actual_report["mode"], "verify");
+    assert_eq!(json_actual_report["source"], "recipe-id");
+    assert_eq!(json_actual_report["status"], "not_found");
+    assert_eq!(json_actual_report["would_execute_http"], false);
     assert!(!json_actual_combined.contains(RAW_SECRET));
 
     let data_only_output = verify_command()

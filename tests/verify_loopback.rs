@@ -221,6 +221,88 @@ fn bearer_auth_is_sent_but_not_written_to_outputs() {
 }
 
 #[test]
+fn cli_verify_recipe_json_actual_json_writes_outputs_without_human_stdout_or_secret_leak() {
+    let server = spawn_one_shot_http_server(200, r#"{"ok":true,"token":"response-secret"}"#);
+    let recipe = bearer_recipe("GET", &server.base_url);
+    let dir = tempdir().expect("tempdir");
+    let recipe_path = dir.path().join("recipe.json");
+    let out_path = dir.path().join("recipe.verified.json");
+    let lock_path = dir.path().join("verified.lock.json");
+    write_recipe(&recipe_path, &recipe);
+
+    let output = verify_command()
+        .args(["verify", "--recipe-json"])
+        .arg(&recipe_path)
+        .args(["--json", "--out"])
+        .arg(&out_path)
+        .args(["--lock-out"])
+        .arg(&lock_path)
+        .env("FIRSTCALL_BEARER_TOKEN", RAW_SECRET)
+        .output()
+        .expect("run cli");
+    let captured = server.join();
+    let combined = combined_output(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report = stdout_json(&output);
+
+    assert_eq!(captured.requests_received, 1);
+    assert!(captured.request_text.expect("request").contains(RAW_SECRET));
+    assert!(output.status.success(), "{combined}");
+    assert_eq!(report["mode"], "verify");
+    assert_eq!(report["source"], "recipe-json");
+    assert_eq!(report["http_status"], 200);
+    assert_eq!(report["outcome"], "success");
+    assert_eq!(report["success"], true);
+    assert_eq!(report["wrote_recipe"], true);
+    assert_eq!(report["wrote_lock"], true);
+    assert!(!stdout.contains("Recipe:"));
+    assert!(!stdout.contains("Wrote verified recipe"));
+    assert!(!combined.contains("response-secret"));
+    assert!(out_path.exists());
+    assert!(lock_path.exists());
+    assert_no_raw_secret(&combined);
+    assert_no_raw_secret(&serde_json::to_string(&report).expect("json report"));
+    assert_no_raw_secret(&fs::read_to_string(&out_path).expect("read recipe"));
+    assert_no_raw_secret(&fs::read_to_string(&lock_path).expect("read lock"));
+}
+
+#[test]
+fn cli_verify_recipe_json_actual_json_failure_is_parseable_and_writes_no_files() {
+    let server = spawn_one_shot_http_server(401, r#"{"error":"unauthorized"}"#);
+    let recipe = no_auth_recipe("GET", &server.base_url);
+    let dir = tempdir().expect("tempdir");
+    let recipe_path = dir.path().join("recipe.json");
+    let out_path = dir.path().join("recipe.verified.json");
+    let lock_path = dir.path().join("verified.lock.json");
+    write_recipe(&recipe_path, &recipe);
+
+    let output = verify_command()
+        .args(["verify", "--recipe-json"])
+        .arg(&recipe_path)
+        .args(["--json", "--out"])
+        .arg(&out_path)
+        .args(["--lock-out"])
+        .arg(&lock_path)
+        .output()
+        .expect("run cli");
+    let captured = server.join();
+    let combined = combined_output(&output);
+    let report = stdout_json(&output);
+
+    assert_eq!(captured.requests_received, 1);
+    assert!(!output.status.success());
+    assert_eq!(report["mode"], "verify");
+    assert_eq!(report["source"], "recipe-json");
+    assert_eq!(report["http_status"], 401);
+    assert_eq!(report["success"], false);
+    assert_eq!(report["wrote_recipe"], false);
+    assert_eq!(report["wrote_lock"], false);
+    assert!(!out_path.exists());
+    assert!(!lock_path.exists());
+    assert_no_raw_secret(&combined);
+}
+
+#[test]
 fn cli_verify_non_2xx_local_response_does_not_mark_verified() {
     let server = spawn_one_shot_http_server(401, r#"{"error":"unauthorized"}"#);
     let recipe = no_auth_recipe("GET", &server.base_url);
@@ -544,8 +626,48 @@ fn cli_verify_recipe_id_dry_run_does_not_update_storage() {
 }
 
 #[test]
-fn cli_verify_recipe_id_actual_json_is_rejected_before_http_and_storage_update() {
-    let server = spawn_no_request_http_server();
+fn cli_verify_recipe_id_actual_json_updates_storage_without_human_stdout_or_secret_leak() {
+    let server = spawn_one_shot_http_server(200, r#"{"ok":true}"#);
+    let storage = store_recipe(&bearer_recipe("GET", &server.base_url));
+
+    let output = verify_command()
+        .args(["verify", "--recipe-id"])
+        .arg(storage.recipe_id.to_string())
+        .args(["--data-dir"])
+        .arg(&storage.data_dir)
+        .args(["--config-dir"])
+        .arg(&storage.config_dir)
+        .args(["--json"])
+        .env("FIRSTCALL_BEARER_TOKEN", RAW_SECRET)
+        .output()
+        .expect("run cli");
+    let captured = server.join();
+    let combined = combined_output(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report = stdout_json(&output);
+
+    assert_eq!(captured.requests_received, 1);
+    assert!(captured.request_text.expect("request").contains(RAW_SECRET));
+    assert!(output.status.success(), "{combined}");
+    assert_eq!(report["mode"], "verify");
+    assert_eq!(report["source"], "recipe-id");
+    assert_eq!(report["recipe_id"], storage.recipe_id);
+    assert_eq!(report["http_status"], 200);
+    assert_eq!(report["success"], true);
+    assert_eq!(report["updated_stored_recipe_verification"], true);
+    assert!(!stdout.contains("Recipe:"));
+    assert!(!stdout.contains("Updated stored recipe verification"));
+    assert_no_raw_secret(&combined);
+
+    let stored = read_stored_recipe(&storage);
+    assert!(stored.last_success_at.is_some());
+    assert_eq!(stored.last_success_status, Some(200));
+    assert_no_raw_secret(&serde_json::to_string(&stored).expect("stored json"));
+}
+
+#[test]
+fn cli_verify_recipe_id_actual_json_failure_does_not_update_storage() {
+    let server = spawn_one_shot_http_server(401, r#"{"error":"unauthorized"}"#);
     let storage = store_recipe(&no_auth_recipe("GET", &server.base_url));
 
     let output = verify_command()
@@ -560,10 +682,16 @@ fn cli_verify_recipe_id_actual_json_is_rejected_before_http_and_storage_update()
         .expect("run cli");
     let captured = server.join();
     let combined = combined_output(&output);
+    let report = stdout_json(&output);
 
-    assert_eq!(captured.requests_received, 0);
+    assert_eq!(captured.requests_received, 1);
     assert!(!output.status.success());
-    assert!(combined.contains("--json is only supported with verify --dry-run/--preflight"));
+    assert_eq!(report["mode"], "verify");
+    assert_eq!(report["source"], "recipe-id");
+    assert_eq!(report["recipe_id"], storage.recipe_id);
+    assert_eq!(report["http_status"], 401);
+    assert_eq!(report["success"], false);
+    assert_eq!(report["updated_stored_recipe_verification"], false);
     assert_no_raw_secret(&combined);
 
     let stored = read_stored_recipe(&storage);
@@ -690,6 +818,10 @@ fn combined_output(output: &Output) -> String {
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> T {
     serde_json::from_str(&fs::read_to_string(path).expect("read json")).expect("parse json")
+}
+
+fn stdout_json(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("stdout json")
 }
 
 fn is_sha256_hex(value: &str) -> bool {

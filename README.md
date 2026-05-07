@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org/)
 
-FirstCall is a native local-first desktop tool for turning pasted `curl` commands, prose API docs, or OpenAPI snippets into one executable HTTP request. It helps fill runtime values, execute the call, classify the outcome, persist redacted attempts locally, and promote successful attempts into reusable recipes.
+FirstCall is a native local-first desktop tool for turning request sources such as pasted `curl` commands, prose API docs, OpenAPI snippets, and static adapter inputs into executable HTTP request drafts. It helps fill runtime values, execute the call, classify the outcome, persist redacted attempts locally, and promote successful attempts into reusable recipes.
 
 FirstCall Agent Recipes adds a second surface to that workflow: **Verified API tool recipes for AI agents.** A recipe becomes an agent-usable package only after a real request has succeeded.
 
@@ -13,6 +13,7 @@ FirstCall Agent Recipes adds a second surface to that workflow: **Verified API t
 
 - Native desktop app built with Rust + `eframe`/`egui`
 - Ingest tabs for `curl`, docs prose, and OpenAPI JSON/YAML/fragments
+- Request source adapter foundation with limited static Postman Collection v2.1 parsing
 - Deterministic request draft extraction and merge precedence: `curl > OpenAPI > docs`
 - Editable request builder for method, base URL, path, headers, query, and body
 - Runtime slot filling and auth handling
@@ -75,9 +76,9 @@ firstcall-cli version
 firstcall-cli explain --recipe-json PATH
 firstcall-cli package --recipe-json PATH --out DIR
 firstcall-cli package --recipe-id ID --out DIR [--data-dir PATH --config-dir PATH]
-firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]
+firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating] [--json]
 firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]
-firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating]
+firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--json]
 firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--dry-run|--preflight] [--json]
 firstcall-cli validate-package --dir PATH [--json]
 firstcall-cli inspect-package --dir PATH [--json]
@@ -86,7 +87,7 @@ firstcall-cli recipe-list [--data-dir PATH --config-dir PATH] [--json]
 firstcall-cli recipe-show --id ID [--data-dir PATH --config-dir PATH] [--json]
 ```
 
-Without `--json`, CLI commands keep human-readable output. With `--json`, report-producing commands emit machine-readable JSON for agents, CI, and scripts. JSON output is for safe/static report surfaces and read-only recipe summaries. Actual non-dry-run HTTP `verify --json` is intentionally not supported yet.
+Without `--json`, CLI commands keep human-readable output. With `--json`, report-producing commands emit machine-readable JSON for agents, CI, and scripts. Actual `verify --json` is supported for recipe JSON and recipe id sources, but reports include only safe fields: no raw request/response bodies, headers, environment values, slot current values, or resolved secret-bearing URLs.
 
 Quick local checks:
 
@@ -165,7 +166,15 @@ cargo run --bin firstcall-cli -- verify `
   --lock-out ./verified.lock.json
 ```
 
-`verify` executes the recipe from the local machine. Secrets must come from environment variables, and raw secret values are not written to the updated recipe or lock file. `POST`, `PUT`, `PATCH`, and `DELETE` require `--allow-mutating`.
+```powershell
+cargo run --bin firstcall-cli -- verify `
+  --recipe-json ./recipe.json `
+  --json `
+  --out ./recipe.verified.json `
+  --lock-out ./verified.lock.json
+```
+
+`verify` executes the recipe from the local machine. Secrets must come from environment variables, and raw secret values are not written to the updated recipe, lock file, human output, or JSON report. `POST`, `PUT`, `PATCH`, and `DELETE` require `--allow-mutating`.
 
 Check whether a recipe is ready to verify without sending HTTP:
 
@@ -192,6 +201,10 @@ cargo run --bin firstcall-cli -- verify --recipe-id 1
 ```
 
 ```powershell
+cargo run --bin firstcall-cli -- verify --recipe-id 1 --json
+```
+
+```powershell
 cargo run --bin firstcall-cli -- verify --recipe-id 1 --dry-run --json
 ```
 
@@ -199,7 +212,7 @@ cargo run --bin firstcall-cli -- verify --recipe-id 1 --dry-run --json
 cargo run --bin firstcall-cli -- verify --recipe-id 1 --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config --dry-run --json
 ```
 
-`verify --dry-run` and `verify --preflight` are aliases. They perform local static/runtime-input preflight only, do not execute HTTP, and do not write `--out` or `--lock-out` files. Human and JSON reports list required environment variables by name with `set` or `missing` status only, never environment values or raw secrets. Mutating methods still require `--allow-mutating` to be ready for real verification. `verify --recipe-id` reads from local recipe storage and can perform actual local verification; on success it updates local SQLite verification metadata. In this phase, actual `verify --recipe-id` does not support `--json`, `--out`, or `--lock-out`.
+`verify --dry-run` and `verify --preflight` are aliases. They perform local static/runtime-input preflight only, do not execute HTTP, and do not write `--out` or `--lock-out` files. Human and JSON reports list required environment variables by name with `set` or `missing` status only, never environment values or raw secrets. Mutating methods still require `--allow-mutating` to be ready for real verification. `verify --recipe-id` reads from local recipe storage and can perform actual local verification; on success it updates local SQLite verification metadata. Actual `verify --recipe-id --json` reports that update as `updated_stored_recipe_verification`; actual `verify --recipe-id` still does not support `--out` or `--lock-out`.
 
 `verify --dry-run` checks whether a recipe is ready to execute. `validate-package` checks exported package structure and integrity.
 
@@ -394,6 +407,7 @@ Each runner executes:
 - Remote `$ref` fetching is intentionally disabled in v1
 - Multipart file uploads are marked unsupported in v1
 - Docs parsing is conservative and heuristic-only
+- Postman Collection v2.1 parsing is limited and static-only; it is not full Postman compatibility, does not execute scripts/tests, and does not import variable values as current slot values
 - OpenAPI body templating focuses on common object/JSON cases
 - Cookie-based auth is reduced to a simple header-oriented fallback in the current MVP
 - Recipe export writes into the app export directory instead of opening a save-file dialog
@@ -404,7 +418,7 @@ Each runner executes:
 - `src/app.rs`: app state, persistence wiring, execution dispatch
 - `src/ui/*`: screens for New Attempt, Attempts, Recipes, Settings
 - `src/model/*`: typed domain models
-- `src/parse/*`: `curl`, docs, and OpenAPI ingestion
+- `src/parse/*`: `curl`, docs, OpenAPI, and request source adapter parsing
 - `src/merge/*`: source precedence and candidate merge rules
 - `src/exec/*`: request execution, classification, validation, redaction
 - `src/store/*`: SQLite migrations/repos and secret storage abstraction

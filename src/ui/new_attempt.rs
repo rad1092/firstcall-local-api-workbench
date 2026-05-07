@@ -59,6 +59,12 @@ impl FirstCallApp {
                                 crate::model::SourceKind::Curl => "curl",
                                 crate::model::SourceKind::Docs => "docs",
                                 crate::model::SourceKind::OpenApi => "openapi",
+                                crate::model::SourceKind::PostmanCollection => "postman",
+                                crate::model::SourceKind::Har => "har",
+                                crate::model::SourceKind::HttpFile => "http",
+                                crate::model::SourceKind::Hurl => "hurl",
+                                crate::model::SourceKind::Bruno => "bruno",
+                                crate::model::SourceKind::Graphql => "graphql",
                             });
                             for note in &parsed.notes {
                                 ui.label(format!("- {note}"));

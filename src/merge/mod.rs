@@ -163,7 +163,13 @@ fn precedence_rank_for_draft(draft: &RequestDraft) -> usize {
 fn precedence_rank(kind: &SourceKind) -> usize {
     match kind {
         SourceKind::Docs => 0,
-        SourceKind::OpenApi => 1,
+        SourceKind::OpenApi
+        | SourceKind::PostmanCollection
+        | SourceKind::Har
+        | SourceKind::HttpFile
+        | SourceKind::Hurl
+        | SourceKind::Bruno
+        | SourceKind::Graphql => 1,
         SourceKind::Curl => 2,
     }
 }

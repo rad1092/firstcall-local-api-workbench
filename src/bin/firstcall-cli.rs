@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use firstcall::exec::redact::redact_free_text;
 use firstcall::export::agent_package::{
     export_agent_package, is_agent_export_eligible, sanitized_agent_url_template,
 };
@@ -83,9 +84,6 @@ fn run() -> Result<()> {
                 (None, None) => bail!("exactly one of --recipe-json or --recipe-id is required"),
                 (Some(_), Some(_)) => bail!("provide only one of --recipe-json or --recipe-id"),
             };
-            if json_output && !dry_run {
-                bail!("--json is only supported with verify --dry-run/--preflight");
-            }
             if matches!(source, VerifySource::RecipeId(_))
                 && (out_path.is_some() || lock_out_path.is_some())
             {
@@ -115,34 +113,64 @@ fn run() -> Result<()> {
                     match verify_recipe_with_process_env(&recipe, VerifyOptions { allow_mutating })
                     {
                         Ok(report) => {
-                            print_verify_summary(&report);
+                            let mut wrote_recipe = false;
+                            let mut wrote_lock = false;
+                            if !json_output {
+                                print_verify_summary(&report);
+                            }
                             if !report.success() {
+                                if json_output {
+                                    print_verify_json_for_recipe_json(
+                                        &report,
+                                        wrote_recipe,
+                                        wrote_lock,
+                                        &[],
+                                    )?;
+                                }
                                 bail!("verification failed");
                             }
-                            if let Some(path) = out_path {
+                            if let Some(path) = &out_path {
                                 fs::write(
-                                    &path,
+                                    path,
                                     serde_json::to_string_pretty(&report.updated_recipe)?,
                                 )
                                 .with_context(|| {
                                     format!("Could not write verified recipe {}", path.display())
                                 })?;
-                                println!("Wrote verified recipe: {}", path.display());
+                                wrote_recipe = true;
+                                if !json_output {
+                                    println!("Wrote verified recipe: {}", path.display());
+                                }
                             }
-                            if let Some(path) = lock_out_path {
+                            if let Some(path) = &lock_out_path {
                                 fs::write(
-                                    &path,
+                                    path,
                                     recipe_to_verified_lock_json(&report.updated_recipe)?,
                                 )
                                 .with_context(|| {
                                     format!("Could not write verified lock {}", path.display())
                                 })?;
-                                println!("Wrote verified lock: {}", path.display());
+                                wrote_lock = true;
+                                if !json_output {
+                                    println!("Wrote verified lock: {}", path.display());
+                                }
+                            }
+                            if json_output {
+                                print_verify_json_for_recipe_json(
+                                    &report,
+                                    wrote_recipe,
+                                    wrote_lock,
+                                    &[],
+                                )?;
                             }
                             Ok(())
                         }
                         Err(error) => {
-                            print_verify_preflight_failure(&recipe, &error);
+                            if json_output {
+                                print_verify_error_json_for_recipe_json(&recipe, &error)?;
+                            } else {
+                                print_verify_preflight_failure(&recipe, &error);
+                            }
                             bail!("verification preflight failed");
                         }
                     }
@@ -179,11 +207,19 @@ fn run() -> Result<()> {
                     } else {
                         let Some(repository) = open_existing_recipe_repository_for_update(&paths)?
                         else {
-                            print_verify_recipe_id_not_found_report(recipe_id, "verify");
+                            if json_output {
+                                print_verify_recipe_id_not_found_json_for_verify(recipe_id)?;
+                            } else {
+                                print_verify_recipe_id_not_found_report(recipe_id, "verify");
+                            }
                             bail!("recipe not found: {recipe_id}");
                         };
                         let Some(recipe) = repository.get_recipe(recipe_id)? else {
-                            print_verify_recipe_id_not_found_report(recipe_id, "verify");
+                            if json_output {
+                                print_verify_recipe_id_not_found_json_for_verify(recipe_id)?;
+                            } else {
+                                print_verify_recipe_id_not_found_report(recipe_id, "verify");
+                            }
                             bail!("recipe not found: {recipe_id}");
                         };
                         match verify_recipe_with_process_env(
@@ -191,19 +227,39 @@ fn run() -> Result<()> {
                             VerifyOptions { allow_mutating },
                         ) {
                             Ok(report) => {
-                                print_verify_summary(&report);
+                                if !json_output {
+                                    print_verify_summary(&report);
+                                }
                                 if !report.success() {
+                                    if json_output {
+                                        print_verify_json_for_recipe_id(
+                                            &report,
+                                            recipe_id,
+                                            false,
+                                            &[],
+                                        )?;
+                                    }
                                     bail!("verification failed");
                                 }
                                 repository.update_recipe_verification(
                                     recipe_id,
                                     &report.updated_recipe,
                                 )?;
-                                println!("Updated stored recipe verification: {recipe_id}");
+                                if json_output {
+                                    print_verify_json_for_recipe_id(&report, recipe_id, true, &[])?;
+                                } else {
+                                    println!("Updated stored recipe verification: {recipe_id}");
+                                }
                                 Ok(())
                             }
                             Err(error) => {
-                                print_verify_preflight_failure(&recipe, &error);
+                                if json_output {
+                                    print_verify_error_json_for_recipe_id(
+                                        &recipe, recipe_id, &error,
+                                    )?;
+                                } else {
+                                    print_verify_preflight_failure(&recipe, &error);
+                                }
                                 bail!("verification preflight failed");
                             }
                         }
@@ -379,6 +435,120 @@ fn print_verify_summary(report: &VerifyReport) {
     );
 }
 
+fn print_verify_json_for_recipe_json(
+    report: &VerifyReport,
+    wrote_recipe: bool,
+    wrote_lock: bool,
+    errors: &[String],
+) -> Result<()> {
+    let mut value = verify_json_value(report, "recipe-json", errors);
+    if let Value::Object(object) = &mut value {
+        object.insert("wrote_recipe".to_string(), json!(wrote_recipe));
+        object.insert("wrote_lock".to_string(), json!(wrote_lock));
+    }
+    print_json(&value)
+}
+
+fn print_verify_json_for_recipe_id(
+    report: &VerifyReport,
+    recipe_id: i64,
+    updated_stored_recipe_verification: bool,
+    errors: &[String],
+) -> Result<()> {
+    let mut value = verify_json_value(report, "recipe-id", errors);
+    if let Value::Object(object) = &mut value {
+        object.insert("recipe_id".to_string(), json!(recipe_id));
+        object.insert(
+            "updated_stored_recipe_verification".to_string(),
+            json!(updated_stored_recipe_verification),
+        );
+    }
+    print_json(&value)
+}
+
+fn verify_json_value(report: &VerifyReport, source: &str, errors: &[String]) -> Value {
+    json!({
+        "product": "FirstCall Agent Recipes",
+        "mode": "verify",
+        "source": source,
+        "recipe": report.recipe_name,
+        "method": report.method,
+        "url_template": report.sanitized_url_template,
+        "http_status": report.status,
+        "outcome": report.outcome.label(),
+        "blocker": report.blocker.as_ref().map(|blocker| blocker.label()),
+        "success": report.success(),
+        "verified_at": report.verified_at.map(|value| value.to_rfc3339()),
+        "blockers": report.blocker.as_ref().map(|blocker| vec![blocker.label().to_string()]).unwrap_or_default(),
+        "errors": errors,
+    })
+}
+
+fn print_verify_error_json_for_recipe_json(recipe: &Recipe, error: &anyhow::Error) -> Result<()> {
+    print_json(&verify_error_json_value(
+        recipe,
+        "recipe-json",
+        None,
+        &[safe_error_text(error)],
+    ))
+}
+
+fn print_verify_error_json_for_recipe_id(
+    recipe: &Recipe,
+    recipe_id: i64,
+    error: &anyhow::Error,
+) -> Result<()> {
+    print_json(&verify_error_json_value(
+        recipe,
+        "recipe-id",
+        Some(recipe_id),
+        &[safe_error_text(error)],
+    ))
+}
+
+fn verify_error_json_value(
+    recipe: &Recipe,
+    source: &str,
+    recipe_id: Option<i64>,
+    errors: &[String],
+) -> Value {
+    let mut value = json!({
+        "product": "FirstCall Agent Recipes",
+        "mode": "verify",
+        "source": source,
+        "recipe": recipe.name,
+        "method": recipe.method.to_ascii_uppercase(),
+        "url_template": sanitized_agent_url_template(recipe),
+        "http_status": null,
+        "outcome": "failure",
+        "blocker": "preflight",
+        "success": false,
+        "verified_at": null,
+        "blockers": ["preflight"],
+        "errors": errors,
+    });
+    if let Value::Object(object) = &mut value {
+        match recipe_id {
+            Some(recipe_id) => {
+                object.insert("recipe_id".to_string(), json!(recipe_id));
+                object.insert(
+                    "updated_stored_recipe_verification".to_string(),
+                    json!(false),
+                );
+            }
+            None => {
+                object.insert("wrote_recipe".to_string(), json!(false));
+                object.insert("wrote_lock".to_string(), json!(false));
+            }
+        }
+    }
+    value
+}
+
+fn safe_error_text(error: &anyhow::Error) -> String {
+    redact_free_text(&error.to_string())
+}
+
 fn print_verify_preflight_failure(recipe: &Recipe, error: &anyhow::Error) {
     println!("Recipe: {}", recipe.name);
     println!("Method: {}", recipe.method.to_ascii_uppercase());
@@ -501,6 +671,22 @@ fn print_verify_recipe_id_not_found_json(recipe_id: i64) -> Result<()> {
         "status": "not_found",
         "recipe": null,
         "would_execute_http": false,
+    }))
+}
+
+fn print_verify_recipe_id_not_found_json_for_verify(recipe_id: i64) -> Result<()> {
+    print_json(&json!({
+        "product": "FirstCall Agent Recipes",
+        "mode": "verify",
+        "source": "recipe-id",
+        "recipe_id": recipe_id,
+        "status": "not_found",
+        "recipe": null,
+        "would_execute_http": false,
+        "success": false,
+        "updated_stored_recipe_verification": false,
+        "blockers": ["not_found"],
+        "errors": [format!("recipe not found: {recipe_id}")],
     }))
 }
 
@@ -976,9 +1162,9 @@ fn print_help() {
   firstcall-cli explain --recipe-json PATH
   firstcall-cli package --recipe-json PATH --out DIR
   firstcall-cli package --recipe-id ID --out DIR [--data-dir PATH --config-dir PATH]
-  firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating]
+  firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating] [--json]
   firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]
-  firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating]
+  firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--json]
   firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--dry-run|--preflight] [--json]
   firstcall-cli validate-package --dir PATH [--json]
   firstcall-cli inspect-package --dir PATH [--json]
