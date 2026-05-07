@@ -315,7 +315,7 @@ Current generated MCP server behavior:
 
 Tool annotations are advisory hints only. They are not security controls. The real guardrails remain `policy.json`, local verify guards, `validate-package`, no raw secret export, and environment-variable-only secret handling.
 
-Rust tests and `validate-package` do not execute:
+Rust tests and default `validate-package` do not execute:
 
 - `npm install`
 - `npm build`
@@ -328,7 +328,7 @@ The generated MCP server files are artifacts. They are not treated as the source
 
 ## Static Validation Rules
 
-Current `firstcall-cli validate-package --dir PATH` behavior is static-only.
+Current `firstcall-cli validate-package --dir PATH` behavior is static-only by default and works without Node, npm, TypeScript, MCP Inspector, or generated runtime execution.
 
 It checks:
 
@@ -345,7 +345,9 @@ It checks:
 - `mcp-server/package.json` and `mcp-server/tsconfig.json` shape.
 - Manifest paths and hashes when `package.manifest.json` is present.
 
-It does not check:
+Maintainers may opt into a local generated MCP compile smoke with `firstcall-cli validate-package --dir PATH --mcp-compile-smoke`. The smoke checks `mcp-server/package.json`, `mcp-server/tsconfig.json`, `mcp-server/src/server.ts`, and then uses the local `mcp-server/node_modules` TypeScript compiler with `--noEmit` if it is already installed. It does not install dependencies, does not use `npx`, does not run MCP Inspector, does not execute the generated server, does not send HTTP, does not read secrets, and does not certify runtime behavior. Missing `node_modules` or missing local TypeScript is reported as a warning; a local TypeScript compile failure is a validation error.
+
+It does not check by default:
 
 - Live API availability.
 - HTTP execution.

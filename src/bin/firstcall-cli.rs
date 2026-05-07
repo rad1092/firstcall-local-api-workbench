@@ -8,7 +8,10 @@ use firstcall::export::agent_package::{
 };
 use firstcall::export::package_import::{PackageImportReport, import_agent_package_dir};
 use firstcall::export::package_inspect::{PackageInspectReport, inspect_agent_package_dir};
-use firstcall::export::package_validation::{PackageValidationReport, validate_agent_package_dir};
+use firstcall::export::package_validation::{
+    PackageValidationOptions, PackageValidationReport, validate_agent_package_dir,
+    validate_agent_package_dir_with_options,
+};
 use firstcall::export::verified_lock::recipe_to_verified_lock_json;
 use firstcall::model::Recipe;
 use firstcall::store::db::AppPaths;
@@ -270,7 +273,17 @@ fn run() -> Result<()> {
         "validate-package" => {
             let package_dir = required_path_arg(&args[1..], "--dir")?;
             let json_output = has_flag(&args[1..], "--json");
-            let report = validate_agent_package_dir(&package_dir);
+            let mcp_compile_smoke = has_flag(&args[1..], "--mcp-compile-smoke");
+            let report = if mcp_compile_smoke {
+                validate_agent_package_dir_with_options(
+                    &package_dir,
+                    PackageValidationOptions {
+                        mcp_compile_smoke: true,
+                    },
+                )
+            } else {
+                validate_agent_package_dir(&package_dir)
+            };
             if json_output {
                 print_package_validation_json(&report)?;
             } else {
@@ -707,6 +720,16 @@ fn print_package_validation_report(report: &PackageValidationReport) {
     println!("Checks passed: {}", report.checks_passed.len());
     println!("Warnings: {}", report.warnings.len());
     println!("Errors: {}", report.errors.len());
+    println!(
+        "MCP compile smoke: {}",
+        report.mcp_compile_smoke.status.as_str()
+    );
+    if report.mcp_compile_smoke.requested && !report.mcp_compile_smoke.messages.is_empty() {
+        println!("MCP compile smoke messages:");
+        for message in &report.mcp_compile_smoke.messages {
+            println!("- {message}");
+        }
+    }
     if !report.warnings.is_empty() {
         println!("Warnings:");
         for warning in &report.warnings {
@@ -730,6 +753,11 @@ fn print_package_validation_json(report: &PackageValidationReport) -> Result<()>
         "checks_passed": report.checks_passed,
         "warnings": report.warnings,
         "errors": report.errors,
+        "mcp_compile_smoke": {
+            "requested": report.mcp_compile_smoke.requested,
+            "status": report.mcp_compile_smoke.status.as_str(),
+            "messages": report.mcp_compile_smoke.messages,
+        },
     }))
 }
 
@@ -1166,7 +1194,7 @@ fn print_help() {
   firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]
   firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--json]
   firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--dry-run|--preflight] [--json]
-  firstcall-cli validate-package --dir PATH [--json]
+  firstcall-cli validate-package --dir PATH [--json] [--mcp-compile-smoke]
   firstcall-cli inspect-package --dir PATH [--json]
   firstcall-cli import-package --dir PATH [--data-dir PATH --config-dir PATH] [--json]
   firstcall-cli recipe-list [--data-dir PATH --config-dir PATH] [--json]

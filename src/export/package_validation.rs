@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use chrono::DateTime;
 use regex::Regex;
@@ -8,6 +9,7 @@ use serde_json::Value;
 
 use super::agent_common::{GENERATOR, looks_destructive_path};
 use super::package_manifest::{MANIFEST_FILE, MANIFESTED_FILES, sha256_file_hex};
+use crate::exec::redact::redact_free_text;
 
 const REQUIRED_DIRS: &[&str] = &["mcp-server", "mcp-server/src"];
 
@@ -25,6 +27,56 @@ pub struct PackageValidationReport {
     pub checks_passed: Vec<String>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
+    pub mcp_compile_smoke: McpCompileSmokeReport,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PackageValidationOptions {
+    pub mcp_compile_smoke: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpCompileSmokeReport {
+    pub requested: bool,
+    pub status: McpCompileSmokeStatus,
+    pub messages: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum McpCompileSmokeStatus {
+    NotRequested,
+    Passed,
+    Warning,
+    Failed,
+}
+
+impl McpCompileSmokeStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::Passed => "passed",
+            Self::Warning => "warning",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl McpCompileSmokeReport {
+    fn not_requested() -> Self {
+        Self {
+            requested: false,
+            status: McpCompileSmokeStatus::NotRequested,
+            messages: Vec::new(),
+        }
+    }
+
+    fn requested() -> Self {
+        Self {
+            requested: true,
+            status: McpCompileSmokeStatus::Warning,
+            messages: Vec::new(),
+        }
+    }
 }
 
 impl PackageValidationReport {
@@ -46,14 +98,29 @@ impl PackageValidationReport {
 }
 
 pub fn validate_agent_package_dir(path: &Path) -> PackageValidationReport {
+    validate_agent_package_dir_with_options(path, PackageValidationOptions::default())
+}
+
+pub fn validate_agent_package_dir_with_options(
+    path: &Path,
+    options: PackageValidationOptions,
+) -> PackageValidationReport {
     let mut report = PackageValidationReport {
         package_dir: path.to_path_buf(),
         checks_passed: Vec::new(),
         warnings: Vec::new(),
         errors: Vec::new(),
+        mcp_compile_smoke: if options.mcp_compile_smoke {
+            McpCompileSmokeReport::requested()
+        } else {
+            McpCompileSmokeReport::not_requested()
+        },
     };
 
     if !validate_package_root(path, &mut report) {
+        if options.mcp_compile_smoke {
+            run_mcp_compile_smoke(path, &mut report);
+        }
         return report;
     }
 
@@ -67,6 +134,9 @@ pub fn validate_agent_package_dir(path: &Path) -> PackageValidationReport {
     validate_package_json(path, &mut report);
     validate_tsconfig_json(path, &mut report);
     validate_package_manifest(path, &mut report);
+    if options.mcp_compile_smoke {
+        run_mcp_compile_smoke(path, &mut report);
+    }
 
     report
 }
@@ -587,6 +657,142 @@ fn validate_tsconfig_json(root: &Path, report: &mut PackageValidationReport) {
             }
             _ => report.error(format!("mcp-server/tsconfig.json {field} must exist")),
         }
+    }
+}
+
+fn run_mcp_compile_smoke(root: &Path, report: &mut PackageValidationReport) {
+    let mcp_dir = root.join("mcp-server");
+    let required_files = [
+        "mcp-server/package.json",
+        "mcp-server/tsconfig.json",
+        "mcp-server/src/server.ts",
+    ];
+    if !mcp_dir.is_dir()
+        || required_files
+            .iter()
+            .any(|relative| !root.join(relative).is_file())
+    {
+        set_mcp_smoke_status(
+            report,
+            McpCompileSmokeStatus::Failed,
+            "MCP compile smoke could not run because required generated MCP files are missing",
+        );
+        return;
+    }
+
+    let node_modules = mcp_dir.join("node_modules");
+    if !node_modules.is_dir() {
+        set_mcp_smoke_status(
+            report,
+            McpCompileSmokeStatus::Warning,
+            "MCP compile smoke skipped because mcp-server/node_modules is missing; run npm install manually in mcp-server to enable it",
+        );
+        return;
+    }
+
+    let Some(tsc_path) = local_tsc_path(&mcp_dir) else {
+        set_mcp_smoke_status(
+            report,
+            McpCompileSmokeStatus::Warning,
+            "MCP compile smoke skipped because local TypeScript compiler was not found in mcp-server/node_modules",
+        );
+        return;
+    };
+
+    let output =
+        if cfg!(windows) && tsc_path.extension().and_then(|value| value.to_str()) == Some("cmd") {
+            Command::new("cmd")
+                .args(["/C"])
+                .arg(&tsc_path)
+                .args(["--project", "tsconfig.json", "--noEmit"])
+                .current_dir(&mcp_dir)
+                .output()
+        } else {
+            Command::new(&tsc_path)
+                .args(["--project", "tsconfig.json", "--noEmit"])
+                .current_dir(&mcp_dir)
+                .output()
+        };
+
+    match output {
+        Ok(output) if output.status.success() => {
+            set_mcp_smoke_status(
+                report,
+                McpCompileSmokeStatus::Passed,
+                "MCP compile smoke passed with local TypeScript compiler",
+            );
+            report.pass("MCP compile smoke passed");
+        }
+        Ok(output) => {
+            set_mcp_smoke_status(
+                report,
+                McpCompileSmokeStatus::Failed,
+                format!(
+                    "MCP compile smoke failed: {}",
+                    summarize_command_output(&output.stdout, &output.stderr)
+                ),
+            );
+            report.error("MCP compile smoke failed");
+        }
+        Err(_) => {
+            set_mcp_smoke_status(
+                report,
+                McpCompileSmokeStatus::Warning,
+                "MCP compile smoke could not start local TypeScript compiler",
+            );
+        }
+    }
+}
+
+fn local_tsc_path(mcp_dir: &Path) -> Option<PathBuf> {
+    let bin_dir = mcp_dir.join("node_modules").join(".bin");
+    let candidates: &[&str] = if cfg!(windows) {
+        &["tsc.cmd", "tsc"]
+    } else {
+        &["tsc"]
+    };
+    candidates
+        .iter()
+        .map(|name| bin_dir.join(name))
+        .find(|path| path.is_file())
+}
+
+fn set_mcp_smoke_status(
+    report: &mut PackageValidationReport,
+    status: McpCompileSmokeStatus,
+    message: impl Into<String>,
+) {
+    let message = redact_free_text(&message.into());
+    report.mcp_compile_smoke.status = status;
+    report.mcp_compile_smoke.messages.push(message.clone());
+    if report.mcp_compile_smoke.status == McpCompileSmokeStatus::Warning {
+        report.warn(message);
+    }
+}
+
+fn summarize_command_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    let text = redact_free_text(&text);
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ");
+    const MAX_SUMMARY_LEN: usize = 600;
+    if lines.len() > MAX_SUMMARY_LEN {
+        lines.truncate(MAX_SUMMARY_LEN);
+        lines.push_str("...");
+    }
+    if lines.is_empty() {
+        "TypeScript compiler exited with a non-zero status".to_string()
+    } else {
+        lines
     }
 }
 

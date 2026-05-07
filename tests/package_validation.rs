@@ -2,7 +2,10 @@ use std::fs;
 use std::process::Command;
 
 use firstcall::export::agent_package::export_agent_package;
-use firstcall::export::package_validation::validate_agent_package_dir;
+use firstcall::export::package_validation::{
+    McpCompileSmokeStatus, PackageValidationOptions, validate_agent_package_dir,
+    validate_agent_package_dir_with_options,
+};
 use firstcall::model::Recipe;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -66,6 +69,18 @@ fn cli_validate_package_success() {
 }
 
 #[test]
+fn cli_help_includes_mcp_compile_smoke_usage() {
+    let output = validate_command().output().expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(!output.status.success());
+    assert!(
+        combined
+            .contains("firstcall-cli validate-package --dir PATH [--json] [--mcp-compile-smoke]")
+    );
+}
+
+#[test]
 fn cli_validate_package_json_success() {
     let package = generate_package();
     let output = validate_command()
@@ -80,6 +95,8 @@ fn cli_validate_package_json_success() {
     assert_eq!(report["product"], "FirstCall Agent Recipes");
     assert_eq!(report["mode"], "validate-package");
     assert_eq!(report["status"], "valid");
+    assert_eq!(report["mcp_compile_smoke"]["requested"], false);
+    assert_eq!(report["mcp_compile_smoke"]["status"], "not_requested");
     assert!(report["errors"].as_array().expect("errors").is_empty());
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET),
@@ -88,6 +105,126 @@ fn cli_validate_package_json_success() {
     assert!(
         !String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET),
         "stderr leaked raw secret"
+    );
+}
+
+#[test]
+fn validate_package_mcp_compile_smoke_not_requested_by_default() {
+    let package = generate_package();
+    let report = validate_agent_package_dir(package.path());
+
+    assert!(report.is_valid(), "errors: {:?}", report.errors);
+    assert!(!report.mcp_compile_smoke.requested);
+    assert_eq!(
+        report.mcp_compile_smoke.status,
+        McpCompileSmokeStatus::NotRequested
+    );
+}
+
+#[test]
+fn cli_validate_package_mcp_compile_smoke_missing_node_modules_warns_without_installing() {
+    let package = generate_package();
+    let output = validate_command()
+        .args(["validate-package", "--dir"])
+        .arg(package.path())
+        .args(["--mcp-compile-smoke"])
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(output.status.success(), "{combined}");
+    assert!(combined.contains("MCP compile smoke: warning"));
+    assert!(combined.contains("node_modules is missing"));
+    assert!(
+        !package.path().join("mcp-server/node_modules").exists(),
+        "validate-package must not install node_modules"
+    );
+    assert!(
+        !package.path().join("mcp-server/package-lock.json").exists(),
+        "validate-package must not run npm install"
+    );
+    assert!(!combined.contains(RAW_SECRET));
+}
+
+#[test]
+fn cli_validate_package_mcp_compile_smoke_missing_local_tsc_warns_without_global_tools() {
+    let package = generate_package();
+    fs::create_dir_all(package.path().join("mcp-server/node_modules/.bin"))
+        .expect("node_modules bin");
+
+    let output = validate_command()
+        .args(["validate-package", "--dir"])
+        .arg(package.path())
+        .args(["--mcp-compile-smoke"])
+        .output()
+        .expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(output.status.success(), "{combined}");
+    assert!(combined.contains("MCP compile smoke: warning"));
+    assert!(combined.contains("local TypeScript compiler was not found"));
+    assert!(
+        !package.path().join("mcp-server/package-lock.json").exists(),
+        "validate-package must not run npm install"
+    );
+    assert!(!combined.contains(RAW_SECRET));
+}
+
+#[test]
+fn cli_validate_package_json_mcp_compile_smoke_missing_node_modules_is_sanitized_warning() {
+    let package = generate_package();
+
+    let output = validate_command()
+        .args(["validate-package", "--dir"])
+        .arg(package.path())
+        .args(["--json", "--mcp-compile-smoke"])
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "{}", combined_output(&output));
+    assert_eq!(report["mcp_compile_smoke"]["requested"], true);
+    assert_eq!(report["mcp_compile_smoke"]["status"], "warning");
+    assert!(
+        report["mcp_compile_smoke"]["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .any(|message| message
+                .as_str()
+                .unwrap_or_default()
+                .contains("node_modules is missing"))
+    );
+    assert!(!stdout.contains(RAW_SECRET), "stdout leaked raw secret");
+    assert!(!stderr.contains(RAW_SECRET), "stderr leaked raw secret");
+}
+
+#[test]
+fn validate_package_mcp_compile_smoke_missing_mcp_server_is_failed() {
+    let package = generate_package();
+    fs::remove_dir_all(package.path().join("mcp-server")).expect("remove mcp server");
+
+    let report = validate_agent_package_dir_with_options(
+        package.path(),
+        PackageValidationOptions {
+            mcp_compile_smoke: true,
+        },
+    );
+
+    assert!(!report.is_valid());
+    assert!(report.mcp_compile_smoke.requested);
+    assert_eq!(
+        report.mcp_compile_smoke.status,
+        McpCompileSmokeStatus::Failed
+    );
+    assert!(
+        report
+            .mcp_compile_smoke
+            .messages
+            .iter()
+            .any(|message| message.contains("required generated MCP files are missing"))
     );
 }
 
@@ -322,6 +459,42 @@ fn validate_package_missing_structured_output_marker_fails() {
     let errors = report.errors.join("\n");
     assert!(!report.is_valid());
     assert!(errors.contains("missing structuredContent"));
+    assert!(!errors.contains(RAW_SECRET));
+}
+
+#[test]
+fn validate_package_missing_output_schema_marker_fails() {
+    let package = generate_package();
+    let server_path = package.path().join("mcp-server/src/server.ts");
+    let server = fs::read_to_string(&server_path).expect("read server");
+    fs::write(
+        &server_path,
+        server.replace("outputSchema", "output_schema_removed"),
+    )
+    .expect("tamper server");
+
+    let report = validate_agent_package_dir(package.path());
+    let errors = report.errors.join("\n");
+    assert!(!report.is_valid());
+    assert!(errors.contains("missing outputSchema"));
+    assert!(!errors.contains(RAW_SECRET));
+}
+
+#[test]
+fn validate_package_missing_mcp_tool_annotations_marker_fails() {
+    let package = generate_package();
+    let server_path = package.path().join("mcp-server/src/server.ts");
+    let server = fs::read_to_string(&server_path).expect("read server");
+    fs::write(
+        &server_path,
+        server.replace("TOOL_ANNOTATIONS", "tool_annotations_removed"),
+    )
+    .expect("tamper server");
+
+    let report = validate_agent_package_dir(package.path());
+    let errors = report.errors.join("\n");
+    assert!(!report.is_valid());
+    assert!(errors.contains("missing TOOL_ANNOTATIONS"));
     assert!(!errors.contains(RAW_SECRET));
 }
 

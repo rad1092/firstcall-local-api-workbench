@@ -80,7 +80,7 @@ firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-
 firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]
 firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--json]
 firstcall-cli verify --recipe-id ID [--data-dir PATH --config-dir PATH] [--allow-mutating] [--dry-run|--preflight] [--json]
-firstcall-cli validate-package --dir PATH [--json]
+firstcall-cli validate-package --dir PATH [--json] [--mcp-compile-smoke]
 firstcall-cli inspect-package --dir PATH [--json]
 firstcall-cli import-package --dir PATH [--data-dir PATH --config-dir PATH] [--json]
 firstcall-cli recipe-list [--data-dir PATH --config-dir PATH] [--json]
@@ -278,6 +278,14 @@ cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool
 `package.manifest.json` records SHA-256 hashes for generated package files. `validate-package` checks package structure, schema metadata, lock metadata, policy shape, MCP template markers including `structuredContent`, `outputSchema`, and tool annotations, obvious secret leaks, and manifest hashes when the manifest is present. Missing `package.manifest.json` currently warns instead of failing for backward compatibility.
 
 `validate-package` is static-only: it does not execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, execute the generated MCP server, import recipes, or modify files. The generated files should not export raw secrets.
+
+Maintainers with local Node dependencies already installed can request an optional MCP compile smoke:
+
+```powershell
+cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool --mcp-compile-smoke
+```
+
+`--mcp-compile-smoke` checks the generated TypeScript template with the local `mcp-server/node_modules` TypeScript compiler when present. It does not run `npm install`, does not use `npx`, does not run MCP Inspector, does not execute the generated server, does not send HTTP, and does not read secrets. Missing `node_modules` is reported as a warning so default static validation remains usable without Node.
 
 Inspect import-readiness without importing anything:
 
