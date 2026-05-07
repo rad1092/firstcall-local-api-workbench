@@ -88,13 +88,16 @@ firstcall-cli recipe-show --id ID [--data-dir PATH --config-dir PATH] [--json]
 
 Without `--json`, CLI commands keep human-readable output. With `--json`, report-producing commands emit machine-readable JSON for agents, CI, and scripts. JSON output is for safe/static report surfaces and read-only recipe summaries. Actual non-dry-run HTTP `verify --json` is intentionally not supported yet.
 
-Checks:
+Quick local checks:
 
 ```powershell
-cargo fmt --all
+cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo test --locked
+cargo build --locked
 ```
+
+For the full CLI lifecycle and release-readiness checklist, see [docs/release-readiness.md](docs/release-readiness.md).
 
 Optional Windows `gnullvm` build:
 
@@ -360,6 +363,8 @@ cargo run --bin firstcall-cli -- inspect-package --dir ./dist/reverified-agent-t
 ```
 
 `import-package` does not preserve verified status, so imported recipes require local re-verification before `package --recipe-id` can export them. `verify --recipe-id --dry-run` does not execute HTTP or update SQLite. Actual `verify --recipe-id` executes local HTTP and updates SQLite verification metadata only on success. `package --recipe-id` does not execute HTTP or mutate SQLite.
+
+For maintainers and agents preparing a handoff or release candidate, use the checklist in [docs/release-readiness.md](docs/release-readiness.md).
 
 ## CI
 

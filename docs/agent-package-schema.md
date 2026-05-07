@@ -253,7 +253,7 @@ Rules:
 - `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, and `X-API-Key` are treated as secret headers.
 - Common secret query keys include `api_key`, `token`, `secret`, `access_token`, and `refresh_token`.
 - Common response redaction keys include `token`, `secret`, `password`, `api_key`, `access_token`, and `refresh_token`.
-- Future import-readiness logic may need stricter reconciliation between `recipe.yaml` and `policy.json` before persistence, because `recipe.yaml` preserves exported runtime placeholders while current `policy.json` stores parse-safe paths.
+- Import-readiness reconciliation checks `recipe.yaml` and `policy.json` before persistence. `recipe.yaml` preserves exported runtime placeholders while current `policy.json` stores parse-safe paths, so the CLI normalizes placeholders conservatively for method, host, and path checks.
 
 ## package.manifest.json Schema
 
@@ -324,7 +324,7 @@ Rust tests and `validate-package` do not execute:
 - MCP Inspector
 - the generated MCP runtime
 
-The generated MCP server files are artifacts. They should not be treated as the source of truth for future import.
+The generated MCP server files are artifacts. They are not treated as the source of truth for package import.
 
 ## Static Validation Rules
 
@@ -473,7 +473,7 @@ Actual non-dry-run HTTP `verify --json` is not supported yet.
 
 Actual desktop UI import remains design-only. The CLI import flow is package-directory-based and only runs after inspect-readiness succeeds.
 
-Current CLI import and future desktop import decisions:
+Current CLI import decisions and future desktop import considerations:
 
 - Import is package-directory-based, not `recipe.yaml`-only.
 - Import runs `validate-package` first through inspect-readiness.
