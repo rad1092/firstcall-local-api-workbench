@@ -469,7 +469,7 @@ Actual non-dry-run HTTP `verify --json` reports must not include raw request bod
 
 ## Request Source Adapters
 
-FirstCall is adding request source adapters beyond the original `curl`, docs prose, and OpenAPI inputs. The current adapter foundation includes source-kind variants for Postman Collection, HAR, `.http`, Hurl, Bruno, and GraphQL. Limited Postman Collection v2.1, HAR, `.http` / `.rest`, and Hurl request-only parsing are implemented; other adapters remain future work.
+FirstCall is adding request source adapters beyond the original `curl`, docs prose, and OpenAPI inputs. The current adapter foundation includes source-kind variants for Postman Collection, HAR, `.http`, Hurl, Bruno, and GraphQL. Limited Postman Collection v2.1, HAR, `.http` / `.rest`, Hurl request-only, and Bruno/OpenCollection parsing are implemented; GraphQL-specific parsing remains future work.
 
 The Postman Collection parser is static-only and intentionally not full Postman compatibility. It converts supported request shapes into `RequestDraft` candidates, preserves `{{slot_name}}` placeholders as slots, ignores scripts/tests with notes, and never imports Postman variable values as `RuntimeSlot.current_value`. GraphQL-looking Postman JSON bodies are parsed as normal JSON bodies with a note that GraphQL-specific handling is deferred.
 
@@ -478,6 +478,8 @@ The HAR parser is static-only and aggressively redacted because browser captures
 The `.http` / `.rest` parser is static-only and intentionally not full JetBrains HTTP Client compatibility. It supports common request lines, headers, JSON/form/text bodies, `###` request separators, and `{{variable}}` placeholders. It does not execute requests, execute pre-request or response-handler scripts, load environments, resolve dynamic variables such as `{{$uuid}}`, or import variable values as `RuntimeSlot.current_value`.
 
 The Hurl parser is static-only and request-only. It converts supported request lines, headers, request-side query/form/basic-auth sections, and request bodies into sanitized `RequestDraft` candidates. It does not execute Hurl files and ignores response bodies, response headers, captures, assertions, cookies, options, and captured variables with sanitized notes.
+
+The Bruno/OpenCollection parser is static-only and intentionally not full Bruno compatibility. It converts a conservative `.bru` and single-file OpenCollection YAML subset into sanitized `RequestDraft` candidates, preserves placeholders as unresolved runtime slots, ignores scripts/tests/runtime hooks/docs/variables/environments with fixed sanitized notes, and never executes requests or imports variable values as `RuntimeSlot.current_value`.
 
 ## Import-Readiness Policy
 
