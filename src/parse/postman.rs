@@ -5,6 +5,7 @@ use crate::model::{
     AuthStyle, BodyTemplate, Confidence, EvidenceItem, FieldConfidence, HeaderField, KeyValueField,
     ParsedSource, RequestDraft, RuntimeSlot, SlotLocation, SourceInput, SourceKind,
 };
+use crate::parse::graphql::annotate_graphql_draft;
 use crate::util::{extract_slot_names, normalize_method, slot_token};
 
 pub fn parse_postman_collection_input(raw_text: &str) -> ParsedSource {
@@ -172,7 +173,7 @@ fn request_to_draft(
     collect_body_slots(&mut slots, &body);
     dedupe_slots(&mut slots);
 
-    Some(RequestDraft {
+    let mut draft = RequestDraft {
         operation_id: format!("postman-{}", uuid::Uuid::new_v4()),
         name: request_name(collection_name, folder_path, item_name),
         method,
@@ -199,7 +200,9 @@ fn request_to_draft(
         response_schema: None,
         unsupported_reason: None,
         source_kinds: vec![SourceKind::PostmanCollection],
-    })
+    };
+    annotate_graphql_draft(&mut draft);
+    Some(draft)
 }
 
 fn parse_url_value(
@@ -603,11 +606,6 @@ fn parse_body(
                 return BodyTemplate::None;
             }
             if let Ok(json_body) = serde_json::from_str::<Value>(raw) {
-                if json_body.get("query").is_some() {
-                    notes.push(
-                        "GraphQL-specific handling for Postman JSON bodies is deferred".to_string(),
-                    );
-                }
                 let safe_body = sanitize_json_value(json_body, slots, SlotLocation::Body);
                 return BodyTemplate::Json {
                     template: serde_json::to_string(&safe_body)
@@ -919,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_nested_post_json_body_and_graphql_note() {
+    fn parses_nested_post_json_body_and_graphql_annotation() {
         let parsed = parse_postman_collection_input(
             r#"{
               "info": {"name": "Nested API"},
@@ -945,11 +943,12 @@ mod tests {
         assert_eq!(draft.method, "POST");
         assert!(draft.name.contains("Users / Create user"));
         assert!(matches!(draft.body, BodyTemplate::Json { .. }));
+        assert!(draft.source_kinds.contains(&SourceKind::Graphql));
         assert!(
-            parsed
-                .notes
+            draft
+                .evidence
                 .iter()
-                .any(|note| note.contains("GraphQL-specific"))
+                .any(|item| item.source_kind == SourceKind::Graphql)
         );
         assert!(draft.slots.iter().any(|slot| slot.name == "token"));
         assert_no_raw_secret(&parsed);

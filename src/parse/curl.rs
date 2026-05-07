@@ -5,6 +5,7 @@ use crate::model::{
     AuthStyle, BodyTemplate, Confidence, EvidenceItem, FieldConfidence, HeaderField, KeyValueField,
     ParsedSource, RequestDraft, RuntimeSlot, SlotLocation, SourceInput, SourceKind,
 };
+use crate::parse::graphql::annotate_graphql_draft;
 use crate::util::{extract_slot_names, normalize_method, slot_token};
 
 pub fn parse_curl_input(raw_text: &str) -> ParsedSource {
@@ -199,7 +200,7 @@ fn parse_single_curl(raw_text: &str) -> Result<RequestDraft> {
 
     dedupe_slots(&mut slots);
 
-    Ok(RequestDraft {
+    let mut draft = RequestDraft {
         operation_id: format!("curl-{}", uuid::Uuid::new_v4()),
         name: format!("{} {}", method, path),
         method,
@@ -223,7 +224,9 @@ fn parse_single_curl(raw_text: &str) -> Result<RequestDraft> {
         response_schema: None,
         unsupported_reason,
         source_kinds: vec![SourceKind::Curl],
-    })
+    };
+    annotate_graphql_draft(&mut draft);
+    Ok(draft)
 }
 
 fn next_value<'a>(tokens: &'a [String], index: &mut usize, flag: &str) -> Result<&'a str> {
@@ -497,7 +500,7 @@ fn dedupe_slots(slots: &mut Vec<RuntimeSlot>) {
 #[cfg(test)]
 mod tests {
     use super::parse_curl_input;
-    use crate::model::{AuthStyle, BodyTemplate};
+    use crate::model::{AuthStyle, BodyTemplate, SourceKind};
 
     #[test]
     fn parses_bearer_json_curl() {
@@ -518,5 +521,28 @@ mod tests {
         let parsed = parse_curl_input("curl https://api.example.com/upload -F file=@sample.png");
         let draft = &parsed.candidates[0];
         assert!(draft.unsupported_reason.is_some());
+    }
+
+    #[test]
+    fn graphql_json_body_is_annotated_safely() {
+        let graphql_secret = "graphql_variable_secret_should_not_leak";
+        let parsed = parse_curl_input(&format!(
+            "curl https://api.example.com/graphql -X POST -H 'Content-Type: application/json' -d '{{\"query\":\"query GetUser($id: ID!) {{ user(id: $id) {{ id }} }}\",\"variables\":{{\"id\":\"{{{{user_id}}}}\",\"password\":\"{graphql_secret}\"}},\"operationName\":\"GetUser\"}}'"
+        ));
+
+        let draft = &parsed.candidates[0];
+        assert!(matches!(draft.body, BodyTemplate::Json { .. }));
+        assert!(draft.source_kinds.contains(&SourceKind::Graphql));
+        assert!(
+            draft
+                .evidence
+                .iter()
+                .any(|item| item.source_kind == SourceKind::Graphql)
+        );
+        assert!(draft.slots.iter().any(|slot| slot.name == "user_id"));
+        assert!(draft.slots.iter().any(|slot| slot.name == "password"));
+        let serialized = serde_json::to_string(&(parsed.candidates, parsed.notes))
+            .expect("serialize parsed output");
+        assert!(!serialized.contains(graphql_secret), "{serialized}");
     }
 }

@@ -5,6 +5,7 @@ use crate::model::{
     AuthStyle, BodyTemplate, Confidence, EvidenceItem, FieldConfidence, HeaderField, KeyValueField,
     ParsedSource, RequestDraft, RuntimeSlot, SlotLocation, SourceInput, SourceKind,
 };
+use crate::parse::graphql::annotate_graphql_draft;
 use crate::util::{normalize_method, slot_token};
 
 const HTTP_FILE_REDACTED_INPUT: &str = "<http file input redacted>";
@@ -170,7 +171,7 @@ fn section_to_draft(section: &Section, notes: &mut Vec<String>) -> Option<Reques
     collect_body_slots(&mut slots, &body);
     dedupe_slots(&mut slots);
 
-    Some(RequestDraft {
+    let mut draft = RequestDraft {
         operation_id: format!("http-file-{}", uuid::Uuid::new_v4()),
         name: request_name(
             section.name.as_ref().or(inline_name.as_ref()),
@@ -198,7 +199,9 @@ fn section_to_draft(section: &Section, notes: &mut Vec<String>) -> Option<Reques
         response_schema: None,
         unsupported_reason: None,
         source_kinds: vec![SourceKind::HttpFile],
-    })
+    };
+    annotate_graphql_draft(&mut draft);
+    Some(draft)
 }
 
 fn parse_request_line(line: &str) -> Option<RequestLine> {
@@ -907,6 +910,35 @@ Content-Type: application/json
         assert!(matches!(draft.body, BodyTemplate::Json { .. }));
         assert!(draft.slots.iter().any(|slot| slot.name == "password"));
         assert!(draft.slots.iter().any(|slot| slot.name == "user_id"));
+        assert_no_canaries(&parsed);
+    }
+
+    #[test]
+    fn graphql_json_post_body_is_annotated_safely() {
+        let graphql_secret = "graphql_variable_secret_should_not_leak";
+        let parsed = parse_http_file_input(&format!(
+            r#"
+POST https://api.example.com/graphql
+Content-Type: application/json
+
+{{"query":"query GetUser($id: ID!) {{ user(id: \"{{{{query_user_id}}}}\") {{ id name }} }}","variables":{{"id":"{{{{user_id}}}}","password":"{graphql_secret}"}},"operationName":"GetUser"}}
+"#
+        ));
+
+        let draft = &parsed.candidates[0];
+        assert!(matches!(draft.body, BodyTemplate::Json { .. }));
+        assert!(draft.source_kinds.contains(&SourceKind::Graphql));
+        assert!(
+            draft
+                .evidence
+                .iter()
+                .any(|item| item.source_kind == SourceKind::Graphql)
+        );
+        for expected in ["query_user_id", "user_id", "password"] {
+            assert!(draft.slots.iter().any(|slot| slot.name == expected));
+        }
+        let serialized = serde_json::to_string(&parsed).expect("serialize parsed source");
+        assert!(!serialized.contains(graphql_secret), "{serialized}");
         assert_no_canaries(&parsed);
     }
 

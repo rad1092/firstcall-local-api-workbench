@@ -13,7 +13,7 @@ FirstCall Agent Recipes adds a second surface to that workflow: **Verified API t
 
 - Native desktop app built with Rust + `eframe`/`egui`
 - Ingest tabs for `curl`, docs prose, and OpenAPI JSON/YAML/fragments
-- Request source adapter foundation with limited static Postman Collection v2.1, HAR, `.http` / `.rest`, Hurl, and Bruno/OpenCollection request parsing
+- Request source adapter foundation with limited static Postman Collection v2.1, HAR, `.http` / `.rest`, Hurl, Bruno/OpenCollection request parsing, and GraphQL-over-HTTP JSON body detection
 - Deterministic request draft extraction and merge precedence: `curl > OpenAPI > docs`
 - Editable request builder for method, base URL, path, headers, query, and body
 - Runtime slot filling and auth handling
@@ -412,6 +412,7 @@ Each runner executes:
 - `.http` / `.rest` parsing is limited and static-only; it supports common request lines, headers, JSON/form/text bodies, `###` request separators, and `{{variable}}` placeholders, but does not execute requests/scripts, load environments, import variable values, or provide full JetBrains HTTP Client compatibility
 - Hurl parsing is limited and static-only for request sections only; it does not execute Hurl files and ignores response bodies, response headers, captures, assertions, cookies, options, and captured variables with sanitized notes
 - Bruno/OpenCollection parsing is limited and static-only for single request files; it supports a conservative `.bru` and OpenCollection YAML subset, ignores scripts/tests/runtime hooks/docs/variables/environments with sanitized notes, and never executes requests or imports variable values
+- GraphQL-over-HTTP support is limited to static JSON body detection in supported parser paths; it does not perform introspection, schema validation, subscriptions, WebSockets, or GraphQL-specific execution, and mutation-looking operations produce advisory notes only
 - OpenAPI body templating focuses on common object/JSON cases
 - Cookie-based auth is reduced to a simple header-oriented fallback in the current MVP
 - Recipe export writes into the app export directory instead of opening a save-file dialog
@@ -422,7 +423,7 @@ Each runner executes:
 - `src/app.rs`: app state, persistence wiring, execution dispatch
 - `src/ui/*`: screens for New Attempt, Attempts, Recipes, Settings
 - `src/model/*`: typed domain models
-- `src/parse/*`: `curl`, docs, OpenAPI, Postman, HAR, `.http` / `.rest`, Hurl, Bruno/OpenCollection, and request source adapter parsing
+- `src/parse/*`: `curl`, docs, OpenAPI, Postman, HAR, `.http` / `.rest`, Hurl, Bruno/OpenCollection, GraphQL-over-HTTP detection, and request source adapter parsing
 - `src/merge/*`: source precedence and candidate merge rules
 - `src/exec/*`: request execution, classification, validation, redaction
 - `src/store/*`: SQLite migrations/repos and secret storage abstraction

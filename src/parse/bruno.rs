@@ -5,6 +5,7 @@ use crate::model::{
     AuthStyle, BodyTemplate, Confidence, EvidenceItem, FieldConfidence, HeaderField, KeyValueField,
     ParsedSource, RequestDraft, RuntimeSlot, SlotLocation, SourceInput, SourceKind,
 };
+use crate::parse::graphql::annotate_graphql_draft;
 use crate::util::{normalize_method, slot_token};
 
 const BRUNO_REDACTED_INPUT: &str = "<bruno input redacted>";
@@ -501,7 +502,7 @@ fn build_draft(input: DraftInput, notes: &mut Vec<String>) -> Option<RequestDraf
     collect_body_slots(&mut slots, &body);
     dedupe_slots(&mut slots);
 
-    Some(RequestDraft {
+    let mut draft = RequestDraft {
         operation_id: format!("bruno-{}", uuid::Uuid::new_v4()),
         name: request_name(input.name.as_ref(), &input.method, &path),
         method: input.method,
@@ -525,7 +526,9 @@ fn build_draft(input: DraftInput, notes: &mut Vec<String>) -> Option<RequestDraf
         response_schema: None,
         unsupported_reason: None,
         source_kinds: vec![SourceKind::Bruno],
-    })
+    };
+    annotate_graphql_draft(&mut draft);
+    Some(draft)
 }
 
 struct UrlParts {
@@ -1570,6 +1573,46 @@ http:
         assert!(matches!(draft.auth, AuthStyle::Bearer { .. }));
         assert!(matches!(draft.body, BodyTemplate::Json { .. }));
         assert!(draft.slots.iter().any(|slot| slot.name == "password"));
+        assert_no_canaries(&parsed);
+    }
+
+    #[test]
+    fn yaml_graphql_json_post_body_is_annotated_safely() {
+        let graphql_secret = "graphql_variable_secret_should_not_leak";
+        let parsed = parse_bruno_input(&format!(
+            r#"
+info:
+  name: GraphQL User
+  type: http
+http:
+  method: POST
+  url: https://api.example.com/graphql
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {{
+        "query": "mutation CreateUser($name: String!) {{ createUser(name: $name) {{ id }} }}",
+        "variables": {{
+          "name": "{{{{name}}}}",
+          "password": "{graphql_secret}"
+        }},
+        "operationName": "CreateUser"
+      }}
+"#
+        ));
+
+        let draft = &parsed.candidates[0];
+        assert!(matches!(draft.body, BodyTemplate::Json { .. }));
+        assert!(draft.source_kinds.contains(&SourceKind::Graphql));
+        assert!(draft.confidence.notes.contains("mutation"));
+        assert!(draft.slots.iter().any(|slot| slot.name == "name"));
+        assert!(draft.slots.iter().any(|slot| slot.name == "password"));
+        assert_all_slots_unresolved(&parsed);
+        let serialized = serde_json::to_string(&parsed).expect("serialize parsed source");
+        assert!(!serialized.contains(graphql_secret), "{serialized}");
         assert_no_canaries(&parsed);
     }
 
