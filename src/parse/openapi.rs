@@ -1,4 +1,9 @@
-use std::collections::BTreeMap;
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use openapiv3::{
@@ -6,8 +11,10 @@ use openapiv3::{
     ParameterSchemaOrContent, PathItem, ReferenceOr, RequestBody, Response, Schema, SecurityScheme,
     Server, StatusCode, StringFormat, VariantOrUnknownOrEmpty,
 };
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::exec::redact::{is_secret_key, redact_body};
 use crate::exec::validation::{media_schema_to_template, openapi_schema_to_json_schema};
 use crate::model::{
     AuthStyle, BodyTemplate, Confidence, EvidenceItem, FieldConfidence, HeaderField, KeyValueField,
@@ -16,27 +23,36 @@ use crate::model::{
 use crate::util::{extract_slot_names, slot_token};
 
 pub fn parse_openapi_input(raw_text: &str) -> ParsedSource {
+    parse_openapi_input_impl(raw_text, None)
+}
+
+pub fn parse_openapi_input_with_base_path(raw_text: &str, base_path: &Path) -> ParsedSource {
+    parse_openapi_input_impl(raw_text, Some(base_path))
+}
+
+fn parse_openapi_input_impl(raw_text: &str, base_path: Option<&Path>) -> ParsedSource {
     let source = SourceInput {
         kind: SourceKind::OpenApi,
-        raw_text: raw_text.to_string(),
+        raw_text: "<openapi input redacted>".to_string(),
     };
 
     let mut notes = Vec::new();
     let mut candidates = Vec::new();
 
     match parse_document(raw_text) {
-        Ok((document, synthetic_note)) => {
+        Ok((document, root_value, synthetic_note)) => {
             if let Some(note) = synthetic_note {
                 notes.push(note);
             }
-            let resolver = Resolver::new(&document);
+            let resolver = Resolver::new(&document, root_value, base_path);
             for (path, path_item_ref) in document.paths.iter() {
                 let Some(path_item) = resolver.resolve_path_item(path_item_ref) else {
-                    notes.push(format!("Skipped unresolved path item ref for {path}"));
+                    notes.push("Skipped unresolved OpenAPI path item ref".to_string());
                     continue;
                 };
                 candidates.extend(path_item_to_drafts(&document, &resolver, path, &path_item));
             }
+            notes.extend(resolver.take_notes());
             if candidates.is_empty() {
                 notes.push("OpenAPI input did not contain any concrete operations".to_string());
             }
@@ -51,14 +67,14 @@ pub fn parse_openapi_input(raw_text: &str) -> ParsedSource {
     }
 }
 
-fn parse_document(raw_text: &str) -> Result<(OpenAPI, Option<String>)> {
+fn parse_document(raw_text: &str) -> Result<(OpenAPI, Value, Option<String>)> {
     let value: Value = serde_json::from_str(raw_text)
         .or_else(|_| yaml_serde::from_str(raw_text))
         .context("OpenAPI input is not valid JSON or YAML")?;
     let (wrapped, note) = wrap_fragment(value);
-    let document: OpenAPI =
-        serde_json::from_value(wrapped).context("Could not deserialize OpenAPI document")?;
-    Ok((document, note))
+    let document: OpenAPI = serde_json::from_value(wrapped.clone())
+        .context("Could not deserialize OpenAPI document")?;
+    Ok((document, wrapped, note))
 }
 
 fn wrap_fragment(value: Value) -> (Value, Option<String>) {
@@ -302,8 +318,11 @@ fn merge_parameters(
 }
 
 fn parameter_placeholder(data: &ParameterData, resolver: &Resolver<'_>) -> Option<String> {
+    if is_secret_key(&data.name) {
+        return Some(slot_token(&data.name));
+    }
     if let Some(example) = &data.example {
-        return Some(example_to_string(example));
+        return Some(redact_body(&example_to_string(example), None));
     }
     match &data.format {
         ParameterSchemaOrContent::Schema(schema) => {
@@ -311,7 +330,7 @@ fn parameter_placeholder(data: &ParameterData, resolver: &Resolver<'_>) -> Optio
                 schema
                     .schema_data
                     .example
-                    .map(|example| example_to_string(&example))
+                    .map(|example| redact_body(&example_to_string(&example), None))
             })
         }
         ParameterSchemaOrContent::Content(content) => content
@@ -366,6 +385,7 @@ fn request_body_to_body(
                 &|reference| resolver.resolve_schema(reference),
                 "body",
             );
+            let template = redact_body(&template, Some("application/json"));
             collect_slots_from_template(
                 slots,
                 &template,
@@ -376,6 +396,7 @@ fn request_body_to_body(
             return BodyTemplate::Json { template };
         }
         if let Some(example) = example_from_media_type(media_type, resolver) {
+            let example = redact_body(&example, Some("application/json"));
             collect_slots_from_template(
                 slots,
                 &example,
@@ -398,7 +419,7 @@ fn request_body_to_body(
             description: "OpenAPI request body content type".to_string(),
             confidence: Confidence::High,
         });
-        return form_fields_from_media_type(media_type, resolver, slots, SlotLocation::Body)
+        return form_fields_from_media_type(media_type, resolver, slots, SlotLocation::Body, false)
             .map(|fields| BodyTemplate::Form { fields })
             .unwrap_or(BodyTemplate::Form { fields: Vec::new() });
     }
@@ -411,13 +432,22 @@ fn request_body_to_body(
             description: "OpenAPI request body content type".to_string(),
             confidence: Confidence::High,
         });
-        if multipart_has_binary(media_type, resolver) {
-            *unsupported_reason =
-                Some("Multipart file uploads are not supported in v1".to_string());
+        let has_binary = multipart_has_binary(media_type, resolver);
+        if has_binary {
+            *unsupported_reason = Some(
+                "Multipart file uploads are not supported in v1; non-file fields were parsed"
+                    .to_string(),
+            );
         }
-        return form_fields_from_media_type(media_type, resolver, slots, SlotLocation::Body)
-            .map(|fields| BodyTemplate::Multipart { fields })
-            .unwrap_or(BodyTemplate::Multipart { fields: Vec::new() });
+        return form_fields_from_media_type(
+            media_type,
+            resolver,
+            slots,
+            SlotLocation::Body,
+            has_binary,
+        )
+        .map(|fields| BodyTemplate::Multipart { fields })
+        .unwrap_or(BodyTemplate::Multipart { fields: Vec::new() });
     }
 
     if let Some((content_type, media_type)) = request_body.content.iter().next() {
@@ -429,6 +459,7 @@ fn request_body_to_body(
             confidence: Confidence::Medium,
         });
         if let Some(example) = example_from_media_type(media_type, resolver) {
+            let example = redact_body(&example, Some(content_type));
             collect_slots_from_template(
                 slots,
                 &example,
@@ -448,21 +479,29 @@ fn form_fields_from_media_type(
     resolver: &Resolver<'_>,
     slots: &mut Vec<RuntimeSlot>,
     location: SlotLocation,
+    skip_file_fields: bool,
 ) -> Option<Vec<KeyValueField>> {
     let schema = media_schema(media_type, resolver)?;
     match &schema.schema_kind {
         openapiv3::SchemaKind::Type(openapiv3::Type::Object(object_type)) => {
             let mut fields = Vec::new();
             for (name, property) in &object_type.properties {
-                let value = if let Some(schema) = resolver.resolve_boxed_schema(property) {
-                    media_schema_to_template(
+                let Some(schema) = resolver.resolve_boxed_schema(property) else {
+                    continue;
+                };
+                if skip_file_fields && schema_is_file_like(&schema) {
+                    continue;
+                }
+                let value = if is_secret_key(name) {
+                    slot_token(name)
+                } else {
+                    let template = media_schema_to_template(
                         &schema,
                         &|reference| resolver.resolve_schema(reference),
                         name,
                     )
-                    .replace('\n', "")
-                } else {
-                    slot_token(name)
+                    .replace('\n', "");
+                    redact_body(&template, Some("application/json"))
                 };
                 fields.push(KeyValueField {
                     key: name.clone(),
@@ -488,17 +527,21 @@ fn multipart_has_binary(media_type: &MediaType, resolver: &Resolver<'_>) -> bool
             .properties
             .values()
             .filter_map(|schema| resolver.resolve_boxed_schema(schema))
-            .any(|schema| match &schema.schema_kind {
-                openapiv3::SchemaKind::Type(openapiv3::Type::String(string_type)) => {
-                    matches!(
-                        string_type.format,
-                        VariantOrUnknownOrEmpty::Item(StringFormat::Binary)
-                    )
-                }
-                _ => false,
-            }),
+            .any(|schema| schema_is_file_like(&schema)),
         _ => false,
     }
+}
+
+fn schema_is_file_like(schema: &Schema) -> bool {
+    let format = match &schema.schema_kind {
+        openapiv3::SchemaKind::Type(openapiv3::Type::String(string_type)) => &string_type.format,
+        _ => return false,
+    };
+    matches!(
+        format,
+        VariantOrUnknownOrEmpty::Item(StringFormat::Binary)
+            | VariantOrUnknownOrEmpty::Item(StringFormat::Byte)
+    )
 }
 
 fn response_schema(operation: &Operation, resolver: &Resolver<'_>) -> Option<SchemaSpec> {
@@ -553,24 +596,25 @@ fn media_schema(media_type: &MediaType, resolver: &Resolver<'_>) -> Option<Schem
 
 fn example_from_media_type(media_type: &MediaType, resolver: &Resolver<'_>) -> Option<String> {
     if let Some(example) = &media_type.example {
-        return Some(example_to_string(example));
+        return Some(redact_body(&example_to_string(example), None));
     }
     if let Some(example) = media_type.examples.values().next() {
         match example {
             ReferenceOr::Item(example) => {
                 if let Some(value) = &example.value {
-                    return Some(example_to_string(value));
+                    return Some(redact_body(&example_to_string(value), None));
                 }
             }
             ReferenceOr::Reference { .. } => {}
         }
     }
     media_schema(media_type, resolver).map(|schema| {
-        media_schema_to_template(
+        let template = media_schema_to_template(
             &schema,
             &|reference| resolver.resolve_schema(reference),
             "body",
-        )
+        );
+        redact_body(&template, Some("application/json"))
     })
 }
 
@@ -761,91 +805,67 @@ fn example_to_string(value: &Value) -> String {
     }
 }
 
+#[derive(Clone)]
+struct ExternalDocument {
+    value: Value,
+    directory: PathBuf,
+}
+
 struct Resolver<'a> {
     document: &'a OpenAPI,
+    root_value: Value,
+    root_directory: Option<PathBuf>,
+    notes: RefCell<Vec<String>>,
+    external_documents: RefCell<BTreeMap<PathBuf, ExternalDocument>>,
+    active_refs: RefCell<Vec<String>>,
+    emitted_notes: RefCell<BTreeSet<String>>,
+    max_depth: usize,
 }
 
 impl<'a> Resolver<'a> {
-    fn new(document: &'a OpenAPI) -> Self {
-        Self { document }
+    fn new(document: &'a OpenAPI, root_value: Value, base_path: Option<&Path>) -> Self {
+        let root_directory = base_path.and_then(|path| {
+            let root = if path.is_file() {
+                path.parent().unwrap_or(path)
+            } else {
+                path
+            };
+            root.canonicalize().ok()
+        });
+        Self {
+            document,
+            root_value,
+            root_directory,
+            notes: RefCell::new(Vec::new()),
+            external_documents: RefCell::new(BTreeMap::new()),
+            active_refs: RefCell::new(Vec::new()),
+            emitted_notes: RefCell::new(BTreeSet::new()),
+            max_depth: 16,
+        }
+    }
+
+    fn take_notes(&self) -> Vec<String> {
+        self.notes.borrow_mut().drain(..).collect()
     }
 
     fn resolve_path_item(&self, value: &ReferenceOr<PathItem>) -> Option<PathItem> {
-        match value {
-            ReferenceOr::Item(item) => Some(item.clone()),
-            ReferenceOr::Reference { reference } => {
-                let parts = parse_ref(reference)?;
-                if *parts.first()? != "paths" {
-                    return None;
-                }
-                let path = unescape_ref_token(parts.get(1)?);
-                self.document.paths.paths.get(&path)?.as_item().cloned()
-            }
-        }
+        self.resolve_reference_or(value)
     }
 
     fn resolve_parameter(&self, value: &ReferenceOr<Parameter>) -> Option<Parameter> {
-        match value {
-            ReferenceOr::Item(item) => Some(item.clone()),
-            ReferenceOr::Reference { reference } => {
-                let name = parse_component_ref(reference, "parameters")?;
-                self.document
-                    .components
-                    .as_ref()?
-                    .parameters
-                    .get(name)?
-                    .as_item()
-                    .cloned()
-            }
-        }
+        self.resolve_reference_or(value)
     }
 
     fn resolve_request_body(&self, value: &ReferenceOr<RequestBody>) -> Option<RequestBody> {
-        match value {
-            ReferenceOr::Item(item) => Some(item.clone()),
-            ReferenceOr::Reference { reference } => {
-                let name = parse_component_ref(reference, "requestBodies")?;
-                self.document
-                    .components
-                    .as_ref()?
-                    .request_bodies
-                    .get(name)?
-                    .as_item()
-                    .cloned()
-            }
-        }
+        self.resolve_reference_or(value)
     }
 
     fn resolve_response(&self, value: &ReferenceOr<Response>) -> Option<Response> {
-        match value {
-            ReferenceOr::Item(item) => Some(item.clone()),
-            ReferenceOr::Reference { reference } => {
-                let name = parse_component_ref(reference, "responses")?;
-                self.document
-                    .components
-                    .as_ref()?
-                    .responses
-                    .get(name)?
-                    .as_item()
-                    .cloned()
-            }
-        }
+        self.resolve_reference_or(value)
     }
 
     fn resolve_schema(&self, value: &ReferenceOr<Schema>) -> Option<Schema> {
-        match value {
-            ReferenceOr::Item(item) => Some(item.clone()),
-            ReferenceOr::Reference { reference } => {
-                let name = parse_component_ref(reference, "schemas")?;
-                self.document
-                    .components
-                    .as_ref()?
-                    .schemas
-                    .get(name)?
-                    .as_item()
-                    .cloned()
-            }
-        }
+        self.resolve_reference_or(value)
     }
 
     fn resolve_boxed_schema(&self, value: &ReferenceOr<Box<Schema>>) -> Option<Schema> {
@@ -862,32 +882,282 @@ impl<'a> Resolver<'a> {
 
     fn resolve_security_scheme_name(&self, name: &str) -> Option<SecurityScheme> {
         let components: &Components = self.document.components.as_ref()?;
-        components.security_schemes.get(name)?.as_item().cloned()
+        self.resolve_reference_or(components.security_schemes.get(name)?)
+    }
+
+    fn resolve_reference_or<T>(&self, value: &ReferenceOr<T>) -> Option<T>
+    where
+        T: Clone + DeserializeOwned,
+    {
+        match value {
+            ReferenceOr::Item(item) => Some(item.clone()),
+            ReferenceOr::Reference { reference } => self.resolve_ref_as(reference),
+        }
+    }
+
+    fn resolve_ref_as<T>(&self, reference: &str) -> Option<T>
+    where
+        T: DeserializeOwned,
+    {
+        let value = self.resolve_ref_value(
+            reference,
+            &self.root_value,
+            self.root_directory.as_deref(),
+            "<root>",
+            0,
+        )?;
+        serde_json::from_value(value)
+            .map_err(|_| self.note_unresolved())
+            .ok()
+    }
+
+    fn resolve_ref_value(
+        &self,
+        reference: &str,
+        current_document: &Value,
+        current_directory: Option<&Path>,
+        current_document_id: &str,
+        depth: usize,
+    ) -> Option<Value> {
+        if depth > self.max_depth {
+            self.note_once("Skipped OpenAPI ref after max depth");
+            return None;
+        }
+
+        let (path_part, pointer) = split_ref(reference);
+        let lower_path = path_part.to_ascii_lowercase();
+        if lower_path.starts_with("http://") || lower_path.starts_with("https://") {
+            self.note_once("Skipped remote OpenAPI ref");
+            return None;
+        }
+        if has_unsupported_scheme(path_part) {
+            self.note_once("Skipped unsupported OpenAPI ref scheme");
+            return None;
+        }
+
+        let (document, directory, document_id) = if path_part.is_empty() {
+            (
+                current_document.clone(),
+                current_directory.map(Path::to_path_buf),
+                current_document_id.to_string(),
+            )
+        } else {
+            let (path, external) = self.load_external_document(path_part, current_directory)?;
+            (
+                external.value,
+                Some(external.directory),
+                path.display().to_string(),
+            )
+        };
+
+        let Some(pointer) = normalize_pointer(pointer) else {
+            self.note_unresolved();
+            return None;
+        };
+        let ref_key = format!("{document_id}#{pointer}");
+        {
+            let active_refs = self.active_refs.borrow();
+            if active_refs.iter().any(|active| active == &ref_key) {
+                self.note_once("Skipped cyclic OpenAPI ref");
+                return None;
+            }
+        }
+
+        self.active_refs.borrow_mut().push(ref_key);
+        let selected = if pointer.is_empty() {
+            Some(document.clone())
+        } else {
+            document.pointer(&pointer).cloned()
+        };
+        let result = selected
+            .or_else(|| {
+                self.note_unresolved();
+                None
+            })
+            .map(|value| {
+                self.expand_refs_in_value(
+                    value,
+                    &document,
+                    directory.as_deref(),
+                    &document_id,
+                    depth + 1,
+                )
+            });
+        self.active_refs.borrow_mut().pop();
+        result
+    }
+
+    fn expand_refs_in_value(
+        &self,
+        value: Value,
+        current_document: &Value,
+        current_directory: Option<&Path>,
+        current_document_id: &str,
+        depth: usize,
+    ) -> Value {
+        if depth > self.max_depth {
+            self.note_once("Skipped OpenAPI ref after max depth");
+            return value;
+        }
+
+        match value {
+            Value::Object(mut object) => {
+                if let Some(Value::String(reference)) = object.get("$ref") {
+                    return self
+                        .resolve_ref_value(
+                            reference,
+                            current_document,
+                            current_directory,
+                            current_document_id,
+                            depth + 1,
+                        )
+                        .unwrap_or_else(|| json!({}));
+                }
+                for item in object.values_mut() {
+                    let original = std::mem::take(item);
+                    *item = self.expand_refs_in_value(
+                        original,
+                        current_document,
+                        current_directory,
+                        current_document_id,
+                        depth + 1,
+                    );
+                }
+                Value::Object(object)
+            }
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| {
+                        self.expand_refs_in_value(
+                            item,
+                            current_document,
+                            current_directory,
+                            current_document_id,
+                            depth + 1,
+                        )
+                    })
+                    .collect(),
+            ),
+            _ => value,
+        }
+    }
+
+    fn load_external_document(
+        &self,
+        path_part: &str,
+        current_directory: Option<&Path>,
+    ) -> Option<(PathBuf, ExternalDocument)> {
+        let Some(current_directory) = current_directory.or(self.root_directory.as_deref()) else {
+            self.note_unresolved();
+            return None;
+        };
+        let Some(root_directory) = self.root_directory.as_ref() else {
+            self.note_unresolved();
+            return None;
+        };
+        let requested = Path::new(path_part);
+        if requested.is_absolute() {
+            self.note_once("Skipped OpenAPI ref outside resolver root");
+            return None;
+        }
+        if !is_supported_ref_extension(requested) {
+            self.note_once("Skipped unsupported OpenAPI ref extension");
+            return None;
+        }
+        let target = current_directory.join(requested);
+        let canonical = match target.canonicalize() {
+            Ok(path) => path,
+            Err(_) => {
+                self.note_unresolved();
+                return None;
+            }
+        };
+        if !canonical.starts_with(root_directory) {
+            self.note_once("Skipped OpenAPI ref outside resolver root");
+            return None;
+        }
+        if let Some(cached) = self.external_documents.borrow().get(&canonical).cloned() {
+            return Some((canonical, cached));
+        }
+
+        let raw = match fs::read_to_string(&canonical) {
+            Ok(raw) => raw,
+            Err(_) => {
+                self.note_unresolved();
+                return None;
+            }
+        };
+        let value =
+            match serde_json::from_str::<Value>(&raw).or_else(|_| yaml_serde::from_str(&raw)) {
+                Ok(value) => value,
+                Err(_) => {
+                    self.note_once("Skipped malformed OpenAPI ref document");
+                    return None;
+                }
+            };
+        let directory = canonical
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| root_directory.clone());
+        let document = ExternalDocument { value, directory };
+        self.external_documents
+            .borrow_mut()
+            .insert(canonical.clone(), document.clone());
+        Some((canonical, document))
+    }
+
+    fn note_unresolved(&self) {
+        self.note_once("Skipped unresolved OpenAPI ref");
+    }
+
+    fn note_once(&self, note: &str) {
+        if self.emitted_notes.borrow_mut().insert(note.to_string()) {
+            self.notes.borrow_mut().push(note.to_string());
+        }
     }
 }
 
-fn parse_component_ref<'a>(reference: &'a str, component: &str) -> Option<&'a str> {
-    let parts = parse_ref(reference)?;
-    if parts.len() == 3 && parts[0] == "components" && parts[1] == component {
-        Some(parts[2])
+fn split_ref(reference: &str) -> (&str, &str) {
+    match reference.split_once('#') {
+        Some((path, pointer)) => (path, pointer),
+        None => (reference, ""),
+    }
+}
+
+fn normalize_pointer(pointer: &str) -> Option<String> {
+    if pointer.is_empty() {
+        return Some(String::new());
+    }
+    if pointer.starts_with('/') {
+        Some(pointer.to_string())
     } else {
         None
     }
 }
 
-fn parse_ref(reference: &str) -> Option<Vec<&str>> {
-    reference
-        .strip_prefix("#/")
-        .map(|value| value.split('/').collect())
+fn has_unsupported_scheme(path_part: &str) -> bool {
+    let lower = path_part.to_ascii_lowercase();
+    lower.starts_with("file:") || (lower.contains("://") && !lower.starts_with("http"))
 }
 
-fn unescape_ref_token(token: &str) -> String {
-    token.replace("~1", "/").replace("~0", "~")
+fn is_supported_ref_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "json" | "yaml" | "yml"
+            )
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_openapi_input;
+    use std::fs;
+
+    use super::{parse_openapi_input, parse_openapi_input_with_base_path};
     use crate::model::{AuthStyle, BodyTemplate};
 
     #[test]
@@ -945,5 +1215,515 @@ components:
         assert!(matches!(draft.auth, AuthStyle::Bearer { .. }));
         assert!(matches!(draft.body, BodyTemplate::Json { .. }));
         assert!(draft.response_schema.is_some());
+    }
+
+    #[test]
+    fn internal_component_schema_refs_still_resolve() {
+        let input = r#"
+openapi: 3.0.3
+info: { title: Demo, version: 1.0.0 }
+paths:
+  /users:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUser'
+      responses:
+        "200": { description: ok }
+components:
+  schemas:
+    CreateUser:
+      type: object
+      properties:
+        name:
+          type: string
+"#;
+        let parsed = parse_openapi_input(input);
+        assert!(parsed.notes.iter().all(|note| !note.contains("unresolved")));
+        let draft = &parsed.candidates[0];
+        let BodyTemplate::Json { template } = &draft.body else {
+            panic!("expected json body");
+        };
+        assert!(template.contains("name"));
+    }
+
+    #[test]
+    fn local_relative_schema_ref_resolves() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("schemas")).expect("schemas dir");
+        fs::write(
+            temp.path().join("schemas/user.yaml"),
+            r#"
+User:
+  type: object
+  properties:
+    email:
+      type: string
+"#,
+        )
+        .expect("schema file");
+        let input = r#"
+openapi: 3.0.3
+info: { title: Demo, version: 1.0.0 }
+paths:
+  /users:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: './schemas/user.yaml#/User'
+      responses:
+        "200": { description: ok }
+"#;
+        let parsed = parse_openapi_input_with_base_path(input, temp.path());
+        assert_eq!(parsed.candidates.len(), 1);
+        let BodyTemplate::Json { template } = &parsed.candidates[0].body else {
+            panic!("expected json body");
+        };
+        assert!(template.contains("email"));
+    }
+
+    #[test]
+    fn local_relative_request_body_response_and_parameter_refs_resolve() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("components")).expect("components dir");
+        fs::write(
+            temp.path().join("components/request_bodies.yaml"),
+            r#"
+CreateUser:
+  required: true
+  content:
+    application/json:
+      schema:
+        type: object
+        properties:
+          name:
+            type: string
+"#,
+        )
+        .expect("request body file");
+        fs::write(
+            temp.path().join("components/responses.yaml"),
+            r#"
+UserResponse:
+  description: ok
+  content:
+    application/json:
+      schema:
+        type: object
+        properties:
+          id:
+            type: string
+"#,
+        )
+        .expect("response file");
+        fs::write(
+            temp.path().join("components/parameters.yaml"),
+            r#"
+UserId:
+  in: query
+  name: user_id
+  schema:
+    type: string
+"#,
+        )
+        .expect("parameter file");
+        let input = r#"
+openapi: 3.0.3
+info: { title: Demo, version: 1.0.0 }
+paths:
+  /users:
+    post:
+      parameters:
+        - $ref: './components/parameters.yaml#/UserId'
+      requestBody:
+        $ref: './components/request_bodies.yaml#/CreateUser'
+      responses:
+        "200":
+          $ref: './components/responses.yaml#/UserResponse'
+"#;
+        let parsed = parse_openapi_input_with_base_path(input, temp.path());
+        assert_eq!(parsed.candidates.len(), 1);
+        let draft = &parsed.candidates[0];
+        assert!(draft.query.iter().any(|field| field.key == "user_id"));
+        assert!(matches!(draft.body, BodyTemplate::Json { .. }));
+        assert!(draft.response_schema.is_some());
+    }
+
+    #[test]
+    fn local_relative_path_item_ref_resolves() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("paths")).expect("paths dir");
+        fs::write(
+            temp.path().join("paths/user.yaml"),
+            r#"
+get:
+  summary: Get user
+  responses:
+    "200":
+      description: ok
+"#,
+        )
+        .expect("path file");
+        let input = r#"
+openapi: 3.0.3
+info: { title: Demo, version: 1.0.0 }
+paths:
+  /users/{id}:
+    $ref: './paths/user.yaml'
+"#;
+        let parsed = parse_openapi_input_with_base_path(input, temp.path());
+        assert_eq!(parsed.candidates.len(), 1);
+        assert_eq!(parsed.candidates[0].method, "GET");
+        assert_eq!(parsed.candidates[0].path, "/users/{{id}}");
+    }
+
+    #[test]
+    fn nested_local_refs_resolve_relative_to_external_document_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("components")).expect("components dir");
+        fs::create_dir(temp.path().join("schemas")).expect("schemas dir");
+        fs::write(
+            temp.path().join("components/request_bodies.yaml"),
+            r#"
+CreateUser:
+  required: true
+  content:
+    application/json:
+      schema:
+        $ref: '../schemas/user.yaml#/User'
+"#,
+        )
+        .expect("request body file");
+        fs::write(
+            temp.path().join("schemas/user.yaml"),
+            r#"
+User:
+  type: object
+  properties:
+    nested_email:
+      type: string
+"#,
+        )
+        .expect("schema file");
+        let input = r#"
+openapi: 3.0.3
+info: { title: Demo, version: 1.0.0 }
+paths:
+  /users:
+    post:
+      requestBody:
+        $ref: './components/request_bodies.yaml#/CreateUser'
+      responses:
+        "200": { description: ok }
+"#;
+        let parsed = parse_openapi_input_with_base_path(input, temp.path());
+        let BodyTemplate::Json { template } = &parsed.candidates[0].body else {
+            panic!("expected json body");
+        };
+        assert!(template.contains("nested_email"));
+    }
+
+    #[test]
+    fn unsafe_or_unavailable_refs_are_skipped_with_sanitized_notes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("root");
+        fs::create_dir(&root).expect("root dir");
+        fs::write(temp.path().join("outside.yaml"), "User:\n  type: object\n")
+            .expect("outside file");
+        fs::write(root.join("bad.yaml"), "not: [valid").expect("bad file");
+        let input = r#"
+openapi: 3.0.3
+info: { title: Demo, version: 1.0.0 }
+paths:
+  /remote:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: 'https://example.com/openapi.yaml?token=openapi_remote_ref_secret_should_not_leak#/components/schemas/User'
+      responses:
+        "200": { description: ok }
+  /unsupported:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: 'file:///etc/passwd#/User'
+      responses:
+        "200": { description: ok }
+  /outside:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '../outside.yaml#/User'
+      responses:
+        "200": { description: ok }
+  /bad:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: './bad.yaml#/User'
+      responses:
+        "200": { description: ok }
+"#;
+        let parsed = parse_openapi_input_with_base_path(input, &root);
+        assert_eq!(parsed.candidates.len(), 4);
+        assert!(
+            parsed
+                .notes
+                .iter()
+                .any(|note| note == "Skipped remote OpenAPI ref")
+        );
+        assert!(
+            parsed
+                .notes
+                .iter()
+                .any(|note| note == "Skipped unsupported OpenAPI ref scheme")
+        );
+        assert!(
+            parsed
+                .notes
+                .iter()
+                .any(|note| note == "Skipped OpenAPI ref outside resolver root")
+        );
+        assert!(
+            parsed
+                .notes
+                .iter()
+                .any(|note| note == "Skipped malformed OpenAPI ref document")
+        );
+        let serialized = serde_json::to_string(&parsed).expect("serialize parsed");
+        assert!(!serialized.contains("openapi_remote_ref_secret_should_not_leak"));
+    }
+
+    #[test]
+    fn cyclic_and_deep_refs_do_not_panic() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            temp.path().join("a.yaml"),
+            "User:\n  allOf:\n    - $ref: './b.yaml#/User'\n",
+        )
+        .expect("a");
+        fs::write(
+            temp.path().join("b.yaml"),
+            "User:\n  allOf:\n    - $ref: './a.yaml#/User'\n",
+        )
+        .expect("b");
+        for index in 0..18 {
+            let next = index + 1;
+            let body = if index == 17 {
+                "User:\n  type: object\n".to_string()
+            } else {
+                format!("User:\n  allOf:\n    - $ref: './d{next}.yaml#/User'\n")
+            };
+            fs::write(temp.path().join(format!("d{index}.yaml")), body).expect("depth file");
+        }
+        let input = r#"
+openapi: 3.0.3
+info: { title: Demo, version: 1.0.0 }
+paths:
+  /cycle:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: './a.yaml#/User'
+      responses:
+        "200": { description: ok }
+  /deep:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: './d0.yaml#/User'
+      responses:
+        "200": { description: ok }
+"#;
+        let parsed = parse_openapi_input_with_base_path(input, temp.path());
+        assert_eq!(parsed.candidates.len(), 2);
+        assert!(
+            parsed
+                .notes
+                .iter()
+                .any(|note| note == "Skipped cyclic OpenAPI ref")
+        );
+        assert!(
+            parsed
+                .notes
+                .iter()
+                .any(|note| note == "Skipped OpenAPI ref after max depth")
+        );
+    }
+
+    #[test]
+    fn multipart_non_file_fields_are_kept_and_file_fields_are_skipped() {
+        let input = r#"
+openapi: 3.0.3
+info: { title: Demo, version: 1.0.0 }
+paths:
+  /text-only:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title:
+                  type: string
+                count:
+                  type: integer
+      responses:
+        "200": { description: ok }
+  /mixed:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                upload:
+                  type: string
+                  format: binary
+      responses:
+        "200": { description: ok }
+  /binary-only:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                upload:
+                  type: string
+                  format: byte
+      responses:
+        "200": { description: ok }
+"#;
+        let parsed = parse_openapi_input(input);
+        let text = parsed
+            .candidates
+            .iter()
+            .find(|draft| draft.path == "/text-only")
+            .expect("text-only draft");
+        assert!(text.unsupported_reason.is_none());
+        let BodyTemplate::Multipart { fields } = &text.body else {
+            panic!("expected multipart");
+        };
+        assert!(fields.iter().any(|field| field.key == "title"));
+        assert!(fields.iter().any(|field| field.key == "count"));
+
+        let mixed = parsed
+            .candidates
+            .iter()
+            .find(|draft| draft.path == "/mixed")
+            .expect("mixed draft");
+        assert_eq!(
+            mixed.unsupported_reason.as_deref(),
+            Some("Multipart file uploads are not supported in v1; non-file fields were parsed")
+        );
+        let BodyTemplate::Multipart { fields } = &mixed.body else {
+            panic!("expected multipart");
+        };
+        assert!(fields.iter().any(|field| field.key == "title"));
+        assert!(!fields.iter().any(|field| field.key == "upload"));
+
+        let binary = parsed
+            .candidates
+            .iter()
+            .find(|draft| draft.path == "/binary-only")
+            .expect("binary draft");
+        assert!(binary.unsupported_reason.is_some());
+        let BodyTemplate::Multipart { fields } = &binary.body else {
+            panic!("expected multipart");
+        };
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn secret_examples_are_not_serialized() {
+        let input = r#"
+openapi: 3.0.3
+info: { title: Demo, version: 1.0.0 }
+paths:
+  /secrets:
+    post:
+      parameters:
+        - in: query
+          name: api_key
+          schema:
+            type: string
+          example: openapi_query_secret_should_not_leak
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password:
+                  type: string
+                  example: openapi_body_secret_should_not_leak
+                nested:
+                  type: object
+                  properties:
+                    token:
+                      type: string
+                      example: openapi_local_ref_secret_should_not_leak
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                access_token:
+                  type: string
+                  example: openapi_multipart_field_secret_should_not_leak
+      responses:
+        "200": { description: ok }
+  /multipart-secrets:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                api_key:
+                  type: string
+                  example: openapi_multipart_field_secret_should_not_leak
+                upload:
+                  type: string
+                  format: binary
+                  example: openapi_multipart_file_secret_should_not_leak
+      responses:
+        "200": { description: ok }
+"#;
+        let parsed = parse_openapi_input(input);
+        let serialized = serde_json::to_string(&parsed).expect("serialize parsed");
+        for canary in [
+            "openapi_local_ref_secret_should_not_leak",
+            "openapi_query_secret_should_not_leak",
+            "openapi_body_secret_should_not_leak",
+            "openapi_multipart_file_secret_should_not_leak",
+            "openapi_multipart_field_secret_should_not_leak",
+        ] {
+            assert!(!serialized.contains(canary), "leaked {canary}");
+        }
+        assert!(serialized.contains("{{api_key}}"));
     }
 }

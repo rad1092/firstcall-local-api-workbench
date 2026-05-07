@@ -483,6 +483,8 @@ The Bruno/OpenCollection parser is static-only and intentionally not full Bruno 
 
 GraphQL-over-HTTP support is static-only. Supported parser paths detect JSON bodies with `query`, preserve the JSON body shape, add GraphQL evidence/source kind, extract unresolved slots from query text and variables, redact secret-looking variable values, and add fixed advisory notes for mutation-looking operations. It does not introspect schemas, validate GraphQL schemas, execute subscriptions/WebSockets, or change existing HTTP mutating-method guard behavior.
 
+OpenAPI parsing supports internal component refs and a path-aware parser entry point for local relative `.json`, `.yaml`, and `.yml` refs. Nested local refs resolve relative to the document that contains them while staying inside the original resolver root. Remote `http`/`https` refs are not fetched, unsupported schemes and refs outside the resolver root are skipped, and cyclic, too-deep, malformed, or unresolved refs add fixed sanitized notes while other operations continue parsing. Multipart non-file fields are parsed where possible; binary/file upload fields remain unsupported in v1 and are not imported as file paths or contents.
+
 ## Import-Readiness Policy
 
 `firstcall-cli inspect-package --dir PATH` implements a static import-readiness report. It does not import packages, persist recipes, modify app storage, execute HTTP, or run generated MCP tooling.

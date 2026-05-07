@@ -404,8 +404,8 @@ Each runner executes:
 
 ## Known Limitations
 
-- Remote `$ref` fetching is intentionally disabled in v1
-- Multipart file uploads are marked unsupported in v1
+- OpenAPI parsing supports internal refs and path-aware local relative JSON/YAML refs; remote `$ref` fetching is intentionally disabled, refs outside the resolver root are skipped, and cyclic/deep/malformed refs produce sanitized notes
+- Multipart non-file fields are parsed where possible; binary/file upload fields are skipped and marked unsupported in v1
 - Docs parsing is conservative and heuristic-only
 - Postman Collection v2.1 parsing is limited and static-only; it is not full Postman compatibility, does not execute scripts/tests, and does not import variable values as current slot values
 - HAR parsing is limited and static-only with aggressive redaction; response bodies, response headers, response cookies, raw cookies, and captured secret values are not imported, and obvious static assets are skipped or warned
@@ -413,7 +413,7 @@ Each runner executes:
 - Hurl parsing is limited and static-only for request sections only; it does not execute Hurl files and ignores response bodies, response headers, captures, assertions, cookies, options, and captured variables with sanitized notes
 - Bruno/OpenCollection parsing is limited and static-only for single request files; it supports a conservative `.bru` and OpenCollection YAML subset, ignores scripts/tests/runtime hooks/docs/variables/environments with sanitized notes, and never executes requests or imports variable values
 - GraphQL-over-HTTP support is limited to static JSON body detection in supported parser paths; it does not perform introspection, schema validation, subscriptions, WebSockets, or GraphQL-specific execution, and mutation-looking operations produce advisory notes only
-- OpenAPI body templating focuses on common object/JSON cases
+- OpenAPI body templating focuses on common object/JSON/form/multipart non-file cases
 - Cookie-based auth is reduced to a simple header-oriented fallback in the current MVP
 - Recipe export writes into the app export directory instead of opening a save-file dialog
 
