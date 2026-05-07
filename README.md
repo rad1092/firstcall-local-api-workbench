@@ -13,7 +13,7 @@ FirstCall Agent Recipes adds a second surface to that workflow: **Verified API t
 
 - Native desktop app built with Rust + `eframe`/`egui`
 - Ingest tabs for `curl`, docs prose, and OpenAPI JSON/YAML/fragments
-- Request source adapter foundation with limited static Postman Collection v2.1, HAR, and `.http` / `.rest` parsing
+- Request source adapter foundation with limited static Postman Collection v2.1, HAR, `.http` / `.rest`, and Hurl request-only parsing
 - Deterministic request draft extraction and merge precedence: `curl > OpenAPI > docs`
 - Editable request builder for method, base URL, path, headers, query, and body
 - Runtime slot filling and auth handling
@@ -410,6 +410,7 @@ Each runner executes:
 - Postman Collection v2.1 parsing is limited and static-only; it is not full Postman compatibility, does not execute scripts/tests, and does not import variable values as current slot values
 - HAR parsing is limited and static-only with aggressive redaction; response bodies, response headers, response cookies, raw cookies, and captured secret values are not imported, and obvious static assets are skipped or warned
 - `.http` / `.rest` parsing is limited and static-only; it supports common request lines, headers, JSON/form/text bodies, `###` request separators, and `{{variable}}` placeholders, but does not execute requests/scripts, load environments, import variable values, or provide full JetBrains HTTP Client compatibility
+- Hurl parsing is limited and static-only for request sections only; it does not execute Hurl files and ignores response bodies, response headers, captures, assertions, cookies, options, and captured variables with sanitized notes
 - OpenAPI body templating focuses on common object/JSON cases
 - Cookie-based auth is reduced to a simple header-oriented fallback in the current MVP
 - Recipe export writes into the app export directory instead of opening a save-file dialog
@@ -420,7 +421,7 @@ Each runner executes:
 - `src/app.rs`: app state, persistence wiring, execution dispatch
 - `src/ui/*`: screens for New Attempt, Attempts, Recipes, Settings
 - `src/model/*`: typed domain models
-- `src/parse/*`: `curl`, docs, OpenAPI, Postman, HAR, `.http` / `.rest`, and request source adapter parsing
+- `src/parse/*`: `curl`, docs, OpenAPI, Postman, HAR, `.http` / `.rest`, Hurl, and request source adapter parsing
 - `src/merge/*`: source precedence and candidate merge rules
 - `src/exec/*`: request execution, classification, validation, redaction
 - `src/store/*`: SQLite migrations/repos and secret storage abstraction
