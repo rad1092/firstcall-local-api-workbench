@@ -13,7 +13,7 @@ FirstCall Agent Recipes adds a second surface to that workflow: **Verified API t
 
 - Native desktop app built with Rust + `eframe`/`egui`
 - Ingest tabs for `curl`, docs prose, and OpenAPI JSON/YAML/fragments
-- Request source adapter foundation with limited static Postman Collection v2.1 parsing
+- Request source adapter foundation with limited static Postman Collection v2.1 and HAR parsing
 - Deterministic request draft extraction and merge precedence: `curl > OpenAPI > docs`
 - Editable request builder for method, base URL, path, headers, query, and body
 - Runtime slot filling and auth handling
@@ -408,6 +408,7 @@ Each runner executes:
 - Multipart file uploads are marked unsupported in v1
 - Docs parsing is conservative and heuristic-only
 - Postman Collection v2.1 parsing is limited and static-only; it is not full Postman compatibility, does not execute scripts/tests, and does not import variable values as current slot values
+- HAR parsing is limited and static-only with aggressive redaction; response bodies, response headers, response cookies, raw cookies, and captured secret values are not imported, and obvious static assets are skipped or warned
 - OpenAPI body templating focuses on common object/JSON cases
 - Cookie-based auth is reduced to a simple header-oriented fallback in the current MVP
 - Recipe export writes into the app export directory instead of opening a save-file dialog
@@ -418,7 +419,7 @@ Each runner executes:
 - `src/app.rs`: app state, persistence wiring, execution dispatch
 - `src/ui/*`: screens for New Attempt, Attempts, Recipes, Settings
 - `src/model/*`: typed domain models
-- `src/parse/*`: `curl`, docs, OpenAPI, and request source adapter parsing
+- `src/parse/*`: `curl`, docs, OpenAPI, Postman, HAR, and request source adapter parsing
 - `src/merge/*`: source precedence and candidate merge rules
 - `src/exec/*`: request execution, classification, validation, redaction
 - `src/store/*`: SQLite migrations/repos and secret storage abstraction

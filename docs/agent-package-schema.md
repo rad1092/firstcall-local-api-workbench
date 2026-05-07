@@ -469,9 +469,11 @@ Actual non-dry-run HTTP `verify --json` reports must not include raw request bod
 
 ## Request Source Adapters
 
-FirstCall is adding request source adapters beyond the original `curl`, docs prose, and OpenAPI inputs. The current adapter foundation includes source-kind variants for Postman Collection, HAR, `.http`, Hurl, Bruno, and GraphQL, but only limited Postman Collection v2.1 parsing is implemented in this slice.
+FirstCall is adding request source adapters beyond the original `curl`, docs prose, and OpenAPI inputs. The current adapter foundation includes source-kind variants for Postman Collection, HAR, `.http`, Hurl, Bruno, and GraphQL. Limited Postman Collection v2.1 parsing and limited HAR parsing are implemented; other adapters remain future work.
 
 The Postman Collection parser is static-only and intentionally not full Postman compatibility. It converts supported request shapes into `RequestDraft` candidates, preserves `{{slot_name}}` placeholders as slots, ignores scripts/tests with notes, and never imports Postman variable values as `RuntimeSlot.current_value`. GraphQL-looking Postman JSON bodies are parsed as normal JSON bodies with a note that GraphQL-specific handling is deferred.
+
+The HAR parser is static-only and aggressively redacted because browser captures may contain credentials, cookies, and private request data. It converts supported request entries into sanitized `RequestDraft` candidates, skips or warns on obvious static assets, does not execute captured requests, and never imports response bodies, response headers, response cookies, raw cookies, Authorization values, API keys, or secret-looking query/body values.
 
 ## Import-Readiness Policy
 
