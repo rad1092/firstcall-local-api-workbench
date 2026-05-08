@@ -5,26 +5,47 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org/)
 
-FirstCall is a native local-first desktop tool for turning request sources such as pasted `curl` commands, prose API docs, OpenAPI snippets, and static adapter inputs into executable HTTP request drafts. It helps fill runtime values, execute the call, classify the outcome, persist redacted attempts locally, and promote successful attempts into reusable recipes.
+FirstCall is a Rust 2024 local-first verified API recipe workbench. It turns request sources into `RequestDraft` candidates, requires local verification, and promotes successful requests into reusable recipes that can be exported as redacted agent packages.
 
-FirstCall Agent Recipes adds a second surface to that workflow: **Verified API tool recipes for AI agents.** A recipe becomes an agent-usable package only after a real request has succeeded.
+FirstCall is not a Postman, Hurl, or Bruno runner. Its source adapters are static intake paths for building verified recipes; imported scripts, tests, runtime hooks, captured responses, and environment files are not executed.
 
 For the current CLI / desktop GUI boundary, see [docs/surfaces.md](docs/surfaces.md). For build-surface notes and optional desktop feature design, see [docs/build-surfaces.md](docs/build-surfaces.md).
 
-## MVP Scope
+## Product Surfaces
 
-- Native desktop app built with Rust + `eframe`/`egui`
-- Ingest tabs for `curl`, docs prose, and OpenAPI JSON/YAML/fragments
-- Request source adapter foundation with limited static Postman Collection v2.1, HAR, `.http` / `.rest`, Hurl, Bruno/OpenCollection request parsing, and GraphQL-over-HTTP JSON body detection
-- Deterministic request draft extraction and merge precedence: `curl > OpenAPI > docs`
-- Editable request builder for method, base URL, path, headers, query, and body
-- Runtime slot filling and auth handling
-- Blocking HTTP execution on a background thread
-- Deterministic outcome and blocker classification
-- Optional JSON Schema validation for JSON responses
-- SQLite persistence for attempts, recipes, and settings
-- Recipe rerun, curl copy, markdown export, and JSON export
-- Verified agent recipe package export from existing recipe JSON
+FirstCall has two product surfaces built on shared local core logic:
+
+- **FirstCall desktop GUI**: the `egui` / `eframe` human workbench for request source intake, source kind selection, parser notes, candidate review, runtime slot/auth entry, local HTTP execution, attempt review, recipe review, settings, and secret backend status.
+- **`firstcall-cli`**: the automation surface for agents, CI, and scripts. It owns verify, package, validate-package, inspect-package, import-package, recipe-list/show, storage-backed verification flows, and JSON reports.
+
+## Desktop GUI Workbench Flow
+
+The desktop GUI supports the interactive recipe-building loop:
+
+1. Paste or select a request source.
+2. Analyze sources with a static parser.
+3. Review parser notes and `RequestDraft` candidates.
+4. Fill required runtime slots and auth values.
+5. Run the request locally.
+6. Inspect the redacted result and saved attempt.
+7. Save a successful execution as a recipe.
+
+Current GUI source kinds are `curl`, docs, OpenAPI, Postman Collection, HAR, `.http` / `.rest`, Hurl, and Bruno/OpenCollection. GraphQL-over-HTTP is detected from JSON request bodies in supported parser paths; it is not a direct GUI input tab.
+
+Auth values entered in the GUI use password-style transient input. Saved auth values are held by the GUI `SecretStore`, are not displayed raw after save, and are not used by CLI verification. Required runtime slots gate execution before HTTP starts. While a request is running, context-changing controls are disabled; attempt persistence uses the run-start source snapshot, and recipe promotion uses the executed successful draft snapshot rather than the mutable builder.
+
+## CLI Automation Flow
+
+The CLI is for repeatable local workflows:
+
+- verify a recipe JSON or stored recipe id;
+- export a verified recipe package;
+- validate and inspect redacted agent packages;
+- import inspect-ready packages into local SQLite storage;
+- list/show safe stored recipe summaries;
+- emit safe JSON reports for agents, CI, and scripts.
+
+CLI verification remains environment-first. It does not read GUI keyring or session-memory secrets.
 
 ## Build And Run
 
@@ -64,6 +85,8 @@ Run:
 ```powershell
 cargo run
 ```
+
+`default-run = "firstcall"` is intentional: this package has both the desktop GUI and `firstcall-cli`, and bare `cargo run` launches the desktop workbench.
 
 CLI:
 
@@ -411,7 +434,8 @@ Each runner executes:
 - Recipes and attempts persist only redacted request/response snapshots
 - GUI credential entry can use an optional native keyring backend when FirstCall is built with the `native-keyring` Cargo feature
 - When native keyring is unavailable or the feature is disabled, credentials fall back to session-only in-memory storage via `secrecy`
-- CLI verification remains environment-first and does not read the GUI keyring
+- CLI verification remains environment-first and does not read GUI keyring or session-memory secrets
+- GUI auth values use password-style transient input and are not displayed raw after save
 - Raw secrets are never intentionally written to SQLite, exports, package files, CLI reports, recipe-list/show output, or logs
 - Tests use fake keyring backends and do not require the actual OS keyring
 
@@ -425,7 +449,7 @@ Each runner executes:
 - `.http` / `.rest` parsing is limited and static-only; it supports common request lines, headers, JSON/form/text bodies, `###` request separators, and `{{variable}}` placeholders, but does not execute requests/scripts, load environments, import variable values, or provide full JetBrains HTTP Client compatibility
 - Hurl parsing is limited and static-only for request sections only; it does not execute Hurl files and ignores response bodies, response headers, captures, assertions, cookies, options, and captured variables with sanitized notes
 - Bruno/OpenCollection parsing is limited and static-only for single request files; it supports a conservative `.bru` and OpenCollection YAML subset, ignores scripts/tests/runtime hooks/docs/variables/environments with sanitized notes, and never executes requests or imports variable values
-- GraphQL-over-HTTP support is limited to static JSON body detection in supported parser paths; it does not perform introspection, schema validation, subscriptions, WebSockets, or GraphQL-specific execution, and mutation-looking operations produce advisory notes only
+- GraphQL-over-HTTP support is detected metadata from JSON bodies in supported parser paths; there is no direct GUI GraphQL input tab, introspection, schema validation, subscriptions, WebSockets, or GraphQL-specific execution, and mutation-looking operations produce advisory notes only
 - OpenAPI body templating focuses on common object/JSON/form/multipart non-file cases
 - Cookie-based auth is reduced to a simple header-oriented fallback in the current MVP
 - Recipe export writes into the app export directory instead of opening a save-file dialog

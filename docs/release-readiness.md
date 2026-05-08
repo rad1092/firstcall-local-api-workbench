@@ -55,6 +55,23 @@ The CLI-first lifecycle expected for a release candidate is:
 - `package --recipe-id` requires successful local verification metadata and does not execute HTTP or mutate SQLite.
 - Generated `mcp-server/` files are artifacts, not package import source of truth.
 
+## Desktop GUI Smoke Checklist
+
+Use this as a local human smoke pass for the desktop workbench:
+
+- `cargo run` opens the desktop GUI.
+- The source selector includes `curl`, docs, OpenAPI, Postman Collection, HAR, `.http` / `.rest`, Hurl, and Bruno/OpenCollection.
+- The curl sample still analyzes and produces at least one candidate.
+- At least one non-curl source kind is reachable from the selector.
+- Parser notes and warnings are visible after analysis.
+- Multiple candidates can be selected when present.
+- Required runtime slots are visible before execution.
+- Auth slot entry uses password-style input, and saved auth values are not displayed raw.
+- Running a request disables context-changing controls until it finishes.
+- A successful result can be saved as a recipe.
+- The Recipes screen shows CLI lifecycle hints without executing them.
+- The Settings screen explains the secret backend and that CLI verification remains environment-first.
+
 ## Non-Goals For Release Validation
 
 Do not run or require:
@@ -66,4 +83,3 @@ Do not run or require:
 - desktop UI import
 - database schema migrations
 - dependency or workflow changes
-

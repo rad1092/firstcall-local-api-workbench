@@ -41,12 +41,23 @@ Current GUI-owned workflows:
 
 - interactive request-source intake
 - source kind selection
+- static parser notes and warnings
 - `RequestDraft` candidate review
 - runtime slot and auth entry
 - local execution and verification feedback
 - attempt list and detail review
 - recipe list and detail review
 - settings and secret backend status display
+
+The GUI currently exposes static source intake for `curl`, docs, OpenAPI,
+Postman Collection, HAR, `.http` / `.rest`, Hurl, and Bruno/OpenCollection.
+GraphQL-over-HTTP remains detected metadata from JSON request bodies rather
+than a direct GUI input tab.
+
+GUI execution context is protected while a request is running. Context-changing
+actions are blocked, attempt persistence uses the run-start source input
+snapshot, and successful recipe promotion uses the executed draft snapshot
+rather than the mutable builder draft.
 
 The GUI may show CLI command hints for package export, validation, inspection,
 import, recipe-id automation, and MCP compile smoke. It should call shared core

@@ -11,6 +11,9 @@ The Rust package exposes one shared library crate and two binaries:
 - `src/main.rs`: default desktop GUI binary.
 - `src/bin/firstcall-cli.rs`: CLI automation binary.
 
+`Cargo.toml` intentionally keeps `default-run = "firstcall"` so bare
+`cargo run` launches the desktop GUI in the multi-binary package.
+
 `eframe` and `egui` are currently package-level dependencies. They are used by
 the desktop GUI entry point and UI modules, but they are not directly used by
 `firstcall-cli`.
