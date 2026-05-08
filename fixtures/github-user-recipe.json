@@ -1,0 +1,42 @@
+{
+  "id": null,
+  "name": "GitHub Authenticated User",
+  "method": "GET",
+  "url_template": "https://api.github.com/user",
+  "headers_template": [
+    {
+      "key": "Accept",
+      "value": "application/vnd.github+json",
+      "required": true,
+      "description": "GitHub REST API JSON response",
+      "confidence": "high"
+    },
+    {
+      "key": "User-Agent",
+      "value": "firstcall-local-api-workbench-demo",
+      "required": true,
+      "description": "Required by GitHub API clients",
+      "confidence": "high"
+    }
+  ],
+  "query_template": [],
+  "body_template": "none",
+  "auth_style": {
+    "bearer": {
+      "token_slot": "bearer_token",
+      "header_name": "Authorization"
+    }
+  },
+  "slots": [
+    {
+      "name": "bearer_token",
+      "location": "auth",
+      "required": true,
+      "current_value": null,
+      "description": "GitHub token from FIRSTCALL_BEARER_TOKEN",
+      "confidence": "high"
+    }
+  ],
+  "last_success_at": null,
+  "last_success_status": null
+}

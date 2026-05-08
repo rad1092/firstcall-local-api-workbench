@@ -1,6 +1,7 @@
 # FirstCall
 
 [![CI](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/ci.yml)
+[![CLI lifecycle](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/cli-lifecycle.yml/badge.svg?branch=main)](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/cli-lifecycle.yml)
 [![Security audit](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org/)
@@ -46,6 +47,39 @@ The CLI is for repeatable local workflows:
 - emit safe JSON reports for agents, CI, and scripts.
 
 CLI verification remains environment-first. It does not read GUI keyring or session-memory secrets.
+
+## Real Verification Demos
+
+FirstCall has reproducible checks that exercise the shipped paths rather than only compiling code:
+
+- `cargo test --locked --test verify_loopback` runs actual local HTTP verification against a loopback server and checks that raw secrets are not written to outputs.
+- `cargo test --locked --test lifecycle_cli` runs the package -> validate -> inspect -> import -> recipe-list/show -> dry-run -> actual local verify -> repackage lifecycle against temp SQLite storage and loopback HTTP.
+- The [CLI lifecycle workflow](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/cli-lifecycle.yml) runs real `firstcall-cli` commands on GitHub Actions: package, validate, inspect, import, list/show, and dry-run.
+
+Optional live external verification can be run locally with a GitHub token. The token is read from `FIRSTCALL_BEARER_TOKEN`; it is not printed or written to the verified recipe, lock file, or JSON report.
+
+```powershell
+$env:FIRSTCALL_BEARER_TOKEN = gh auth token
+cargo run --locked --bin firstcall-cli -- verify `
+  --recipe-json fixtures/github-user-recipe.json `
+  --json `
+  --out ./tmp/github-user.verified.json `
+  --lock-out ./tmp/github-user.lock.json
+Remove-Item Env:FIRSTCALL_BEARER_TOKEN
+```
+
+Generated MCP server artifacts can also be compiled outside the default Rust test suite:
+
+```powershell
+cargo run --locked --bin firstcall-cli -- package --recipe-json fixtures/verified-agent-recipe.json --out ./dist/sample-agent-tool
+Push-Location ./dist/sample-agent-tool/mcp-server
+npm install
+npm run build
+Pop-Location
+cargo run --locked --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool --mcp-compile-smoke
+```
+
+This MCP check installs dependencies only in the generated package directory, compiles TypeScript, and does not run the generated MCP server or send HTTP.
 
 ## Build And Run
 

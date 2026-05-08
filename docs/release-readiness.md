@@ -31,6 +31,36 @@ cargo test --locked --test package_inspect
 cargo test --locked --test package_import
 ```
 
+## Real Local And Live Checks
+
+The two highest-value executable checks are:
+
+```powershell
+cargo test --locked --test verify_loopback
+cargo test --locked --test lifecycle_cli
+```
+
+For an optional live external read-only verification, use a GitHub token through the normal CLI env-first path:
+
+```powershell
+$env:FIRSTCALL_BEARER_TOKEN = gh auth token
+cargo run --locked --bin firstcall-cli -- verify --recipe-json fixtures/github-user-recipe.json --json --out ./tmp/github-user.verified.json --lock-out ./tmp/github-user.lock.json
+Remove-Item Env:FIRSTCALL_BEARER_TOKEN
+```
+
+For generated MCP template compile confidence, run the build in a generated package directory:
+
+```powershell
+cargo run --locked --bin firstcall-cli -- package --recipe-json fixtures/verified-agent-recipe.json --out ./dist/sample-agent-tool
+Push-Location ./dist/sample-agent-tool/mcp-server
+npm install
+npm run build
+Pop-Location
+cargo run --locked --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool --mcp-compile-smoke
+```
+
+The live GitHub check sends a read-only GET request. The MCP compile check does not run the generated server.
+
 ## Lifecycle Contract
 
 The CLI-first lifecycle expected for a release candidate is:
