@@ -80,7 +80,7 @@ cargo test --locked
 cargo build --locked
 ```
 
-For the current package layout, GUI/CLI binaries, and deferred optional desktop feature split, see [docs/build-surfaces.md](docs/build-surfaces.md).
+For the current package layout, GUI/CLI binaries, desktop feature, and CLI-only build commands, see [docs/build-surfaces.md](docs/build-surfaces.md).
 
 ## Verification And Packages
 

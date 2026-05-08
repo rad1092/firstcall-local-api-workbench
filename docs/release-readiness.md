@@ -18,6 +18,13 @@ cargo test --locked
 cargo build --locked
 ```
 
+CLI-only build check:
+
+```powershell
+cargo build --locked --bin firstcall-cli --no-default-features
+cargo run --locked --bin firstcall-cli --no-default-features -- version
+```
+
 Focused CLI lifecycle checks:
 
 ```powershell

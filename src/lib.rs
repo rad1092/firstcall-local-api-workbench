@@ -1,3 +1,4 @@
+#[cfg(feature = "desktop")]
 pub mod app;
 pub mod exec;
 pub mod export;
@@ -5,6 +6,7 @@ pub mod merge;
 pub mod model;
 pub mod parse;
 pub mod store;
+#[cfg(feature = "desktop")]
 pub mod ui;
 pub mod util;
 pub mod verify;

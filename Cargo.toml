@@ -5,8 +5,18 @@ edition = "2024"
 license = "MIT"
 default-run = "firstcall"
 
+[[bin]]
+name = "firstcall"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "firstcall-cli"
+path = "src/bin/firstcall-cli.rs"
+
 [features]
-default = []
+default = ["desktop"]
+desktop = ["dep:eframe", "dep:egui"]
 native-keyring = [
     "dep:keyring",
     "keyring/apple-native",
@@ -19,8 +29,8 @@ anyhow = "=1.0.102"
 base64 = "=0.22.1"
 chrono = { version = "=0.4.44", features = ["clock", "serde"] }
 directories = "=6.0.0"
-eframe = { version = "=0.34.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
-egui = "=0.34.1"
+eframe = { version = "=0.34.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"], optional = true }
+egui = { version = "=0.34.1", optional = true }
 jsonschema = { version = "=0.46.2", default-features = false }
 keyring = { version = "=3.6.3", default-features = false, optional = true }
 once_cell = "=1.21.4"

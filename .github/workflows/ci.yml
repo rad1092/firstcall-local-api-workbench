@@ -36,6 +36,11 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Validate CLI-only build
+        run: |
+          cargo build --locked --bin firstcall-cli --no-default-features
+          cargo run --locked --bin firstcall-cli --no-default-features -- version
+
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
         run: |
