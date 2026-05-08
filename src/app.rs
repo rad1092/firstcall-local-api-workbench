@@ -22,7 +22,7 @@ use crate::parse::{curl::parse_curl_input, docs::parse_docs_input, openapi::pars
 use crate::store::db::{AppPaths, open_database};
 use crate::store::migrations::run_migrations;
 use crate::store::repos::AppRepository;
-use crate::store::secrets::{MemorySecretStore, SecretStore, SecretStoreStatus};
+use crate::store::secrets::{SecretStore, SecretStoreStatus, default_secret_store};
 use crate::util::{SAMPLE_CURL, SAMPLE_DOCS, SAMPLE_OPENAPI};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +77,7 @@ pub struct FirstCallApp {
     pub settings: AppSettings,
     pub paths: AppPaths,
     pub repository: AppRepository,
-    pub secret_store: MemorySecretStore,
+    pub secret_store: Box<dyn SecretStore>,
     pub secret_status: SecretStoreStatus,
     pub http_client: Client,
     pub status_message: Option<String>,
@@ -91,7 +91,7 @@ impl FirstCallApp {
         let settings = repository.load_settings().unwrap_or_default();
         let attempts = repository.list_attempts().unwrap_or_default();
         let recipes = repository.list_recipes().unwrap_or_default();
-        let secret_store = MemorySecretStore::default();
+        let secret_store = default_secret_store();
         let secret_status = secret_store.status();
         let http_client = build_http_client(&settings).unwrap_or_else(|_| Client::new());
 
@@ -145,7 +145,7 @@ impl FirstCallApp {
             .selected_candidate
             .and_then(|index| self.candidate_drafts.get(index).cloned());
         if let Some(draft) = &mut self.working_draft {
-            hydrate_auth_slots(draft, &self.secret_store);
+            hydrate_auth_slots(draft, self.secret_store.as_ref());
         }
         if self.candidate_drafts.is_empty() {
             self.status_message = Some("No operation candidates were found".to_string());
@@ -162,7 +162,7 @@ impl FirstCallApp {
             self.selected_candidate = Some(index);
             self.working_draft = Some(candidate);
             if let Some(draft) = &mut self.working_draft {
-                hydrate_auth_slots(draft, &self.secret_store);
+                hydrate_auth_slots(draft, self.secret_store.as_ref());
             }
         }
     }
@@ -195,7 +195,7 @@ impl FirstCallApp {
             self.status_message = Some("Select or build a request first".to_string());
             return;
         };
-        sync_auth_slots(&draft, &mut self.secret_store);
+        sync_auth_slots(&draft, self.secret_store.as_mut());
         self.secret_status = self.secret_store.status();
 
         let settings = self.settings.clone();
@@ -278,7 +278,7 @@ impl FirstCallApp {
         if let Ok(Some(recipe)) = self.repository.get_recipe(id) {
             self.working_draft = Some(recipe_to_draft(recipe));
             if let Some(draft) = &mut self.working_draft {
-                hydrate_auth_slots(draft, &self.secret_store);
+                hydrate_auth_slots(draft, self.secret_store.as_ref());
             }
             self.screen = TopScreen::NewAttempt;
         }

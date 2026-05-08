@@ -3,7 +3,6 @@ use secrecy::SecretString;
 
 use crate::app::{FirstCallApp, InputTab};
 use crate::model::{BodyTemplate, HeaderField, KeyValueField, Outcome};
-use crate::store::secrets::SecretStore;
 
 impl FirstCallApp {
     pub(crate) fn render_new_attempt(&mut self, root_ui: &mut egui::Ui) {
@@ -111,6 +110,7 @@ impl FirstCallApp {
                                 {
                                     self.secret_store
                                         .set(&slot.name, SecretString::new(value.clone().into()));
+                                    self.secret_status = self.secret_store.status();
                                 }
                                 if !slot.description.is_empty() {
                                     ui.small(&slot.description);

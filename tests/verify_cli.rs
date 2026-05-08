@@ -13,6 +13,7 @@ use tempfile::{TempDir, tempdir};
 
 const RAW_SECRET: &str = "sk_test_verify_raw_secret";
 const ENV_SECRET_MARKER: &str = "user_123_secretish_for_test";
+const KEYRING_BEARER_SECRET: &str = "keyring_bearer_secret_should_not_leak";
 
 #[test]
 fn verify_dry_run_alias_reports_ready_without_network() {
@@ -304,6 +305,35 @@ fn verify_recipe_id_dry_run_json_ready_from_storage() {
     assert_eq!(report["preflight_status"], "ready");
     assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
     assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
+}
+
+#[test]
+fn verify_cli_remains_env_first_and_does_not_print_keyring_named_secret() {
+    let recipe = bearer_recipe("GET");
+    let (_dir, recipe_path) = write_recipe(&recipe);
+
+    let output = verify_command()
+        .args(["verify", "--recipe-json"])
+        .arg(&recipe_path)
+        .args(["--dry-run", "--json"])
+        .env("FIRSTCALL_BEARER_TOKEN", KEYRING_BEARER_SECRET)
+        .output()
+        .expect("run cli");
+    let report = stdout_json(&output);
+
+    assert!(output.status.success(), "{}", combined_output(&output));
+    assert_eq!(report["mode"], "dry-run");
+    assert_eq!(report["preflight_status"], "ready");
+    assert!(
+        report["required_env"]
+            .as_array()
+            .expect("required env")
+            .iter()
+            .any(|item| item["name"] == "FIRSTCALL_BEARER_TOKEN" && item["status"] == "set")
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(KEYRING_BEARER_SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(KEYRING_BEARER_SECRET));
+    assert!(!report.to_string().contains(KEYRING_BEARER_SECRET));
 }
 
 #[test]

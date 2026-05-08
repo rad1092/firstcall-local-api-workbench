@@ -406,6 +406,8 @@ Secret values must not be written to:
 
 Secret references must use environment variable names. Validation and preflight reports may show environment variable names and set/missing status only. They must not show values.
 
+The desktop GUI may use an optional native keyring backend for runtime credential entry when FirstCall is built with the `native-keyring` Cargo feature. This does not change package or CLI semantics: CLI verification remains environment-first, package artifacts use environment-variable references, and raw secrets must not be written to SQLite, exports, package files, logs, CLI reports, recipe-list, or recipe-show output. If native keyring is unavailable, the GUI falls back to session-only memory storage. Tests use fake keyring backends and do not require the OS keyring.
+
 Examples of acceptable environment variable names:
 
 - `FIRSTCALL_BEARER_TOKEN`

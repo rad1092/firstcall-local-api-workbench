@@ -407,8 +407,11 @@ Each runner executes:
 - App data uses `directories::ProjectDirs` with qualifier `dev`, organization `rad1092`, application `FirstCall`
 - SQLite database lives under the app data directory
 - Recipes and attempts persist only redacted request/response snapshots
-- Native keyring is intentionally disabled in this environment; credentials fall back to session-only in-memory storage via `secrecy`
-- Raw secrets are never intentionally written to SQLite, exports, or logs
+- GUI credential entry can use an optional native keyring backend when FirstCall is built with the `native-keyring` Cargo feature
+- When native keyring is unavailable or the feature is disabled, credentials fall back to session-only in-memory storage via `secrecy`
+- CLI verification remains environment-first and does not read the GUI keyring
+- Raw secrets are never intentionally written to SQLite, exports, package files, CLI reports, recipe-list/show output, or logs
+- Tests use fake keyring backends and do not require the actual OS keyring
 
 ## Known Limitations
 
