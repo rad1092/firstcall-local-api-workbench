@@ -163,3 +163,7 @@ cargo run --bin firstcall-cli -- inspect-package --dir ./dist/reverified-agent-t
 ```
 
 Imported recipes require local re-verification before `package --recipe-id` can export them. `verify --recipe-id --dry-run` does not execute HTTP or update SQLite. Actual `verify --recipe-id` updates SQLite verification metadata only on success. `package --recipe-id` does not execute HTTP or mutate SQLite.
+
+The CLI lifecycle GitHub Actions workflow runs this storage-backed flow with
+`firstcall-cli --no-default-features`, actual local loopback HTTP verification,
+and validation/inspection of the re-exported package.

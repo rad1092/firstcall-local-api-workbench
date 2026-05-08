@@ -82,6 +82,9 @@ The CLI-first lifecycle expected for a release candidate is:
 8. Validate and inspect the re-exported package.
 
 `tests/lifecycle_cli.rs` covers this flow with local temp files, temp SQLite storage, and loopback HTTP only.
+The CLI lifecycle GitHub Actions workflow also runs this storage-backed flow
+through actual `verify --recipe-id` against a local loopback server and then
+validates the re-exported package.
 
 ## Safety Checks
 
