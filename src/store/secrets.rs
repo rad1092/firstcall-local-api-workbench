@@ -15,7 +15,7 @@ const MEMORY_BACKEND: &str = "session-memory";
 const NATIVE_BACKEND: &str = "native-keyring";
 #[cfg(feature = "native-keyring")]
 const NATIVE_KEYRING_SERVICE: &str = "dev.rad1092.firstcall";
-const MEMORY_WARNING: &str = "Native keychain integration is disabled in this environment; secrets are stored only for the current session.";
+const MEMORY_WARNING: &str = "Native keychain integration is unavailable on this machine or was not enabled; secrets are stored only for the current session.";
 #[cfg(any(feature = "native-keyring", test))]
 const NATIVE_FALLBACK_WARNING: &str =
     "Native keyring is unavailable; secrets are stored only for the current session.";
