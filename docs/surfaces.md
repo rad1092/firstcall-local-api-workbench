@@ -4,6 +4,9 @@ FirstCall has two product surfaces built on the same local-first Rust library.
 The boundary is intentional: the CLI is the automation surface, and the
 desktop GUI is the interactive workbench.
 
+For the current Cargo build boundary and optional desktop feature design, see
+[build-surfaces.md](build-surfaces.md).
+
 ## `firstcall-cli`
 
 `firstcall-cli` is the scriptable surface for agents, CI, and local workflows.
