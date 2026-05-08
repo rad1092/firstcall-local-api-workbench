@@ -15,8 +15,8 @@ The Rust package exposes one shared library crate and two binaries:
 `default = ["desktop"]`, so bare `cargo run` launches the desktop GUI in the
 normal developer workflow.
 
-`eframe` and `egui` are optional dependencies enabled by the `desktop` feature.
-The `app` and `ui` library modules are also gated behind `desktop`.
+`eframe`, `egui`, and `rfd` are optional dependencies enabled by the `desktop`
+feature. The `app` and `ui` library modules are also gated behind `desktop`.
 `firstcall-cli` builds without the desktop feature and does not depend on GUI
 state or the GUI secret store for verification.
 

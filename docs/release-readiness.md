@@ -109,6 +109,7 @@ Use this as a local human smoke pass for the desktop workbench:
 - Auth slot entry uses password-style input, and saved auth values are not displayed raw.
 - Running a request disables context-changing controls until it finishes.
 - A successful result can be saved as a recipe.
+- Markdown and JSON recipe exports open native save dialogs, write the selected file, and write nothing when canceled.
 - The Recipes screen shows CLI lifecycle hints without executing them.
 - The Settings screen explains the secret backend and that CLI verification remains environment-first.
 

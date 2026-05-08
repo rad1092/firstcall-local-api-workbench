@@ -12,11 +12,13 @@ FirstCall is not a Postman, Hurl, or Bruno runner. Source adapters are static in
 
 ## Demos
 
-Desktop GUI workbench, captured from the current `firstcall` app:
+Desktop GUI workbench, captured from the current `firstcall` app.
+Run it with `cargo run` or explicitly with `cargo run --bin firstcall`:
 
 <img src="docs/assets/firstcall-gui-workbench.gif" alt="FirstCall desktop GUI workbench demo" width="900">
 
-CLI lifecycle, rendered from actual `firstcall-cli` command output:
+CLI lifecycle, rendered from actual `firstcall-cli` command output.
+Run it with `cargo run --bin firstcall-cli -- version`; CLI-only builds use `cargo run --locked --bin firstcall-cli --no-default-features -- version`:
 
 <img src="docs/assets/firstcall-cli-demo.gif" alt="FirstCall CLI lifecycle demo" width="900">
 
@@ -113,6 +115,5 @@ For non-goals and adapter limitations, see [docs/non-goals.md](docs/non-goals.md
 - OpenAPI remote refs are not fetched; path-aware local JSON/YAML refs are supported by the parser path that has a base directory.
 - Multipart file uploads are not supported in v1; non-file fields are parsed where possible.
 - GraphQL-over-HTTP support is detected metadata from JSON bodies only; there is no introspection, schema validation, subscriptions, or WebSockets.
-- Recipe export currently writes into the app export directory instead of opening a native save-file dialog.
 
 More detail is in [docs/non-goals.md](docs/non-goals.md) and [docs/release-readiness.md](docs/release-readiness.md).

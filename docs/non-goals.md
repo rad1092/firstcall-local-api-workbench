@@ -30,7 +30,6 @@ FirstCall is a local-first verified API recipe workbench. Its source adapters ar
 - OpenAPI body templating focuses on common object, JSON, form, and multipart non-file cases.
 - Docs parsing is conservative and heuristic-only.
 - Cookie-based auth is reduced to a simple header-oriented fallback in the current MVP.
-- Recipe export writes into the app export directory instead of opening a native save-file dialog.
 
 ## Safety Invariants
 

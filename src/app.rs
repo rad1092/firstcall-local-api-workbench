@@ -518,23 +518,42 @@ impl FirstCallApp {
     }
 
     pub fn export_recipe_markdown(&mut self, id: i64) {
-        self.export_recipe_with(id, "md", recipe_to_markdown);
+        self.export_recipe_with(
+            id,
+            "md",
+            "Markdown",
+            &["md", "markdown"],
+            recipe_to_markdown,
+        );
     }
 
     pub fn export_recipe_json(&mut self, id: i64) {
-        self.export_recipe_with(id, "json", |recipe| {
+        self.export_recipe_with(id, "json", "JSON", &["json"], |recipe| {
             recipe_to_json(recipe).unwrap_or_default()
         });
     }
 
-    fn export_recipe_with<F>(&mut self, id: i64, extension: &str, render: F)
-    where
+    fn export_recipe_with<F>(
+        &mut self,
+        id: i64,
+        extension: &str,
+        filter_name: &str,
+        filter_extensions: &[&str],
+        render: F,
+    ) where
         F: Fn(&Recipe) -> String,
     {
         match self.repository.get_recipe(id) {
             Ok(Some(recipe)) => {
                 let filename = format!("{}.{extension}", sanitize_filename(&recipe.name));
-                let path = self.paths.exports_dir.join(filename);
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter(filter_name, filter_extensions)
+                    .set_file_name(filename)
+                    .save_file()
+                else {
+                    self.status_message = Some("Export cancelled".to_string());
+                    return;
+                };
                 match std::fs::write(&path, render(&recipe)) {
                     Ok(_) => {
                         self.status_message =
