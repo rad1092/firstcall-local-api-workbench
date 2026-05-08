@@ -330,6 +330,14 @@ impl FirstCallApp {
         };
         hydrate_auth_slots(&mut draft, self.secret_store.as_ref());
         self.secret_status = self.secret_store.status();
+        let missing_slots = unresolved_required_slot_names(&draft);
+        if !missing_slots.is_empty() {
+            self.status_message = Some(format!(
+                "Cannot run request: missing required runtime slot(s): {}",
+                missing_slots.join(", ")
+            ));
+            return;
+        }
 
         let settings = self.settings.clone();
         let client = self.http_client.clone();
@@ -817,6 +825,14 @@ fn hydrate_auth_slots(draft: &mut RequestDraft, secret_store: &dyn SecretStore) 
     }
 }
 
+fn unresolved_required_slot_names(draft: &RequestDraft) -> Vec<String> {
+    draft
+        .unresolved_slots()
+        .into_iter()
+        .map(|slot| slot.name.clone())
+        .collect()
+}
+
 fn clear_visible_auth_slots(draft: &mut RequestDraft) {
     for slot in &mut draft.slots {
         if slot.location == SlotLocation::Auth {
@@ -843,5 +859,128 @@ fn slot_has_runtime_value(
             .unwrap_or("")
             .trim()
             .is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use secrecy::SecretString;
+
+    use crate::model::{
+        AuthStyle, BodyTemplate, Confidence, FieldConfidence, RuntimeSlot, SourceKind,
+    };
+    use crate::store::secrets::MemorySecretStore;
+
+    use super::*;
+
+    #[test]
+    fn unresolved_required_slot_names_reports_empty_required_slots() {
+        let draft = draft_with_slots(vec![
+            runtime_slot("bearer_token", SlotLocation::Auth, true, None),
+            runtime_slot("user_id", SlotLocation::Path, true, None),
+            runtime_slot("page", SlotLocation::Query, false, None),
+        ]);
+
+        assert_eq!(
+            unresolved_required_slot_names(&draft),
+            vec!["bearer_token".to_string(), "user_id".to_string()]
+        );
+    }
+
+    #[test]
+    fn hydrated_auth_slot_is_not_unresolved_on_execution_clone() {
+        let mut visible_draft = draft_with_slots(vec![
+            runtime_slot("bearer_token", SlotLocation::Auth, true, None),
+            runtime_slot("user_id", SlotLocation::Path, true, Some("42")),
+        ]);
+        let mut secret_store = MemorySecretStore::default();
+        secret_store.set(
+            "bearer_token",
+            SecretString::new("auth_secret_used_only_for_execution".to_string().into()),
+        );
+
+        let mut execution_draft = visible_draft.clone();
+        hydrate_auth_slots(&mut execution_draft, &secret_store);
+
+        assert!(unresolved_required_slot_names(&execution_draft).is_empty());
+        assert!(
+            execution_draft
+                .slots
+                .iter()
+                .any(|slot| slot.name == "bearer_token" && slot.current_value.is_some())
+        );
+
+        clear_visible_auth_slots(&mut visible_draft);
+        assert!(
+            visible_draft
+                .slots
+                .iter()
+                .any(|slot| slot.name == "bearer_token" && slot.current_value.is_none())
+        );
+    }
+
+    #[test]
+    fn clear_visible_auth_slots_only_clears_auth_values() {
+        let mut draft = draft_with_slots(vec![
+            runtime_slot("bearer_token", SlotLocation::Auth, true, Some("secret")),
+            runtime_slot("user_id", SlotLocation::Path, true, Some("42")),
+        ]);
+
+        clear_visible_auth_slots(&mut draft);
+
+        assert!(
+            draft
+                .slots
+                .iter()
+                .any(|slot| slot.name == "bearer_token" && slot.current_value.is_none())
+        );
+        assert!(
+            draft
+                .slots
+                .iter()
+                .any(|slot| slot.name == "user_id" && slot.current_value.as_deref() == Some("42"))
+        );
+    }
+
+    fn draft_with_slots(slots: Vec<RuntimeSlot>) -> RequestDraft {
+        RequestDraft {
+            operation_id: "test-operation".to_string(),
+            name: "Test Operation".to_string(),
+            method: "GET".to_string(),
+            base_url: Some("https://api.example.com".to_string()),
+            path: "/users/{{user_id}}".to_string(),
+            headers: Vec::new(),
+            query: Vec::new(),
+            body: BodyTemplate::None,
+            auth: AuthStyle::Bearer {
+                token_slot: "bearer_token".to_string(),
+                header_name: "Authorization".to_string(),
+            },
+            slots,
+            evidence: Vec::new(),
+            confidence: FieldConfidence {
+                overall: Confidence::High,
+                notes: "test draft".to_string(),
+            },
+            response_schema: None,
+            unsupported_reason: None,
+            source_kinds: vec![SourceKind::Curl],
+        }
+    }
+
+    fn runtime_slot(
+        name: &str,
+        location: SlotLocation,
+        required: bool,
+        current_value: Option<&str>,
+    ) -> RuntimeSlot {
+        RuntimeSlot {
+            name: name.to_string(),
+            location,
+            required,
+            current_value: current_value.map(str::to_string),
+            description: String::new(),
+            confidence: Confidence::High,
+        }
     }
 }
