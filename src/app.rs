@@ -188,6 +188,7 @@ impl Default for InputBuffers {
 
 struct RunningExecution {
     receiver: Receiver<ExecutionResult>,
+    draft_snapshot: RequestDraft,
 }
 
 pub struct FirstCallApp {
@@ -198,6 +199,7 @@ pub struct FirstCallApp {
     pub selected_candidate: Option<usize>,
     pub working_draft: Option<RequestDraft>,
     pub last_execution: Option<ExecutionResult>,
+    pub last_successful_draft: Option<RequestDraft>,
     pub attempts: Vec<AttemptListItem>,
     pub selected_attempt_id: Option<i64>,
     pub recipes: Vec<RecipeListItem>,
@@ -235,6 +237,7 @@ impl FirstCallApp {
             selected_candidate: None,
             working_draft: None,
             last_execution: None,
+            last_successful_draft: None,
             attempts,
             selected_attempt_id: None,
             recipes,
@@ -253,6 +256,7 @@ impl FirstCallApp {
     }
 
     pub fn analyze_inputs(&mut self) {
+        self.clear_execution_state();
         self.parsed_sources = parse_input_buffers(&self.inputs);
         self.candidate_drafts = merge_parsed_sources(&self.parsed_sources);
         self.selected_candidate = if self.candidate_drafts.is_empty() {
@@ -279,6 +283,7 @@ impl FirstCallApp {
 
     pub fn select_candidate(&mut self, index: usize) {
         if let Some(candidate) = self.candidate_drafts.get(index).cloned() {
+            self.clear_execution_state();
             self.selected_candidate = Some(index);
             self.working_draft = Some(candidate);
             if let Some(draft) = &mut self.working_draft {
@@ -298,6 +303,8 @@ impl FirstCallApp {
         self.selected_candidate = None;
         self.working_draft = None;
         self.last_execution = None;
+        self.last_successful_draft = None;
+        self.running_execution = None;
         self.auth_slot_inputs.clear();
     }
 
@@ -339,10 +346,14 @@ impl FirstCallApp {
             return;
         }
 
+        let safe_executed_draft_snapshot = safe_executed_draft_snapshot(&draft);
         let settings = self.settings.clone();
         let client = self.http_client.clone();
         let (sender, receiver) = mpsc::channel();
-        self.running_execution = Some(RunningExecution { receiver });
+        self.running_execution = Some(RunningExecution {
+            receiver,
+            draft_snapshot: safe_executed_draft_snapshot,
+        });
         self.status_message = Some("Running request...".to_string());
         std::thread::spawn(move || {
             let result = execute_request(&draft, &settings, &client);
@@ -351,13 +362,26 @@ impl FirstCallApp {
     }
 
     pub fn poll_execution(&mut self) {
-        let Some(running) = &self.running_execution else {
-            return;
+        let received = {
+            let Some(running) = &self.running_execution else {
+                return;
+            };
+            running
+                .receiver
+                .try_recv()
+                .ok()
+                .map(|result| (running.draft_snapshot.clone(), result))
         };
-        if let Ok(result) = running.receiver.try_recv() {
-            self.last_execution = Some(result);
+
+        if let Some((draft_snapshot, result)) = received {
             self.running_execution = None;
-            self.persist_latest_attempt();
+            self.last_successful_draft = if result.outcome == Outcome::Success {
+                Some(draft_snapshot.clone())
+            } else {
+                None
+            };
+            self.persist_latest_attempt(&draft_snapshot, &result);
+            self.last_execution = Some(result);
             self.refresh_lists();
             if let Some(result) = &self.last_execution {
                 self.status_message =
@@ -391,6 +415,7 @@ impl FirstCallApp {
 
     pub fn reopen_attempt(&mut self, id: i64) {
         if let Ok(Some(attempt)) = self.repository.get_attempt(id) {
+            self.clear_execution_state();
             self.inputs = InputBuffers::default();
             let mut first_tab = None;
             for source in &attempt.source_inputs {
@@ -406,7 +431,6 @@ impl FirstCallApp {
             if let Some(draft) = &mut self.working_draft {
                 clear_visible_auth_slots(draft);
             }
-            self.last_execution = None;
             self.auth_slot_inputs.clear();
             self.screen = TopScreen::NewAttempt;
         }
@@ -414,6 +438,7 @@ impl FirstCallApp {
 
     pub fn rerun_recipe(&mut self, id: i64) {
         if let Ok(Some(recipe)) = self.repository.get_recipe(id) {
+            self.clear_execution_state();
             self.working_draft = Some(recipe_to_draft(recipe));
             if let Some(draft) = &mut self.working_draft {
                 clear_visible_auth_slots(draft);
@@ -424,13 +449,9 @@ impl FirstCallApp {
     }
 
     pub fn save_current_recipe(&mut self) {
-        let Some(draft) = self.working_draft.clone() else {
-            self.status_message = Some("No draft selected".to_string());
-            return;
-        };
         let Some(result) = &self.last_execution else {
             self.status_message =
-                Some("Run the request successfully before saving a recipe".to_string());
+                Some("Run the request successfully before saving a recipe.".to_string());
             return;
         };
         if result.outcome != Outcome::Success {
@@ -438,24 +459,13 @@ impl FirstCallApp {
                 Some("Only successful attempts can be saved as recipes by default".to_string());
             return;
         }
-
-        let sanitized = redact_draft_for_storage(&draft);
-        let recipe = Recipe {
-            id: None,
-            name: default_recipe_name(&sanitized),
-            method: sanitized.method.clone(),
-            url_template: build_recipe_url(&sanitized),
-            headers_template: sanitized.headers.clone(),
-            query_template: sanitized.query.clone(),
-            body_template: sanitized.body.clone(),
-            auth_style: sanitized.auth.clone(),
-            slots: sanitized.slots.clone(),
-            last_success_at: Some(Utc::now()),
-            last_success_status: result
-                .response_snapshot
-                .as_ref()
-                .and_then(|response| response.status),
+        let Some(draft) = &self.last_successful_draft else {
+            self.status_message =
+                Some("Run the request successfully before saving a recipe.".to_string());
+            return;
         };
+
+        let recipe = recipe_from_executed_draft(draft, result);
         match self.repository.insert_recipe(&recipe) {
             Ok(_) => {
                 self.refresh_lists();
@@ -514,38 +524,12 @@ impl FirstCallApp {
         }
     }
 
-    fn persist_latest_attempt(&mut self) {
-        let Some(draft) = self.working_draft.clone() else {
-            return;
-        };
-        let Some(result) = self.last_execution.as_ref() else {
-            return;
-        };
-        let request = redact_request(&result.rendered_request);
-        let response = result.response_snapshot.as_ref().map(redact_response);
-        let attempt = RequestAttempt {
-            id: None,
-            created_at: Utc::now(),
-            source_inputs: safe_source_inputs(&self.parsed_sources, &self.inputs)
-                .into_iter()
-                .map(|mut input| {
-                    input.raw_text = redact_free_text(&input.raw_text);
-                    input
-                })
-                .collect(),
-            request_draft_snapshot: redact_draft_for_storage(&draft),
-            rendered_request_redacted: request,
-            response_snapshot_redacted: response,
-            outcome: result.outcome.clone(),
-            blocker: result.blocker.clone(),
-            notes: result.notes.clone(),
-            evidence_summary: draft
-                .evidence
-                .iter()
-                .map(|item| format!("{} ({})", item.label, item.confidence.label()))
-                .collect::<Vec<_>>()
-                .join(", "),
-        };
+    fn persist_latest_attempt(&mut self, executed_draft: &RequestDraft, result: &ExecutionResult) {
+        let attempt = attempt_from_executed_draft(
+            executed_draft,
+            result,
+            safe_source_inputs(&self.parsed_sources, &self.inputs),
+        );
         if let Err(error) = self.repository.insert_attempt(&attempt) {
             self.status_message = Some(format!("Could not persist attempt: {error}"));
         }
@@ -593,6 +577,12 @@ impl FirstCallApp {
                     .set(&slot_name, SecretString::new(value.into()));
             }
         }
+    }
+
+    fn clear_execution_state(&mut self) {
+        self.last_execution = None;
+        self.last_successful_draft = None;
+        self.running_execution = None;
     }
 }
 
@@ -814,6 +804,62 @@ fn sanitize_filename(input: &str) -> String {
         .collect::<String>()
 }
 
+fn safe_executed_draft_snapshot(execution_draft: &RequestDraft) -> RequestDraft {
+    let mut snapshot = redact_draft_for_storage(execution_draft);
+    clear_visible_auth_slots(&mut snapshot);
+    snapshot
+}
+
+fn recipe_from_executed_draft(executed_draft: &RequestDraft, result: &ExecutionResult) -> Recipe {
+    let sanitized = safe_executed_draft_snapshot(executed_draft);
+    Recipe {
+        id: None,
+        name: default_recipe_name(&sanitized),
+        method: sanitized.method.clone(),
+        url_template: build_recipe_url(&sanitized),
+        headers_template: sanitized.headers.clone(),
+        query_template: sanitized.query.clone(),
+        body_template: sanitized.body.clone(),
+        auth_style: sanitized.auth.clone(),
+        slots: sanitized.slots.clone(),
+        last_success_at: Some(Utc::now()),
+        last_success_status: result
+            .response_snapshot
+            .as_ref()
+            .and_then(|response| response.status),
+    }
+}
+
+fn attempt_from_executed_draft(
+    executed_draft: &RequestDraft,
+    result: &ExecutionResult,
+    source_inputs: Vec<crate::model::SourceInput>,
+) -> RequestAttempt {
+    RequestAttempt {
+        id: None,
+        created_at: Utc::now(),
+        source_inputs: source_inputs
+            .into_iter()
+            .map(|mut input| {
+                input.raw_text = redact_free_text(&input.raw_text);
+                input
+            })
+            .collect(),
+        request_draft_snapshot: safe_executed_draft_snapshot(executed_draft),
+        rendered_request_redacted: redact_request(&result.rendered_request),
+        response_snapshot_redacted: result.response_snapshot.as_ref().map(redact_response),
+        outcome: result.outcome.clone(),
+        blocker: result.blocker.clone(),
+        notes: result.notes.clone(),
+        evidence_summary: executed_draft
+            .evidence
+            .iter()
+            .map(|item| format!("{} ({})", item.label, item.confidence.label()))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
 fn hydrate_auth_slots(draft: &mut RequestDraft, secret_store: &dyn SecretStore) {
     for slot in &mut draft.slots {
         if slot.location == SlotLocation::Auth
@@ -864,11 +910,16 @@ fn slot_has_runtime_value(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use secrecy::SecretString;
 
     use crate::model::{
-        AuthStyle, BodyTemplate, Confidence, FieldConfidence, RuntimeSlot, SourceKind,
+        AuthStyle, BodyTemplate, Confidence, EvidenceItem, FieldConfidence, RenderedRequest,
+        ResponseSnapshot, RuntimeSlot, SourceInput, SourceKind,
     };
+    use crate::store::db::AppPaths;
+    use crate::store::repos::AppRepository;
     use crate::store::secrets::MemorySecretStore;
 
     use super::*;
@@ -942,6 +993,118 @@ mod tests {
         );
     }
 
+    #[test]
+    fn safe_executed_draft_snapshot_clears_auth_current_values_after_hydration() {
+        let mut execution_draft = draft_with_slots(vec![
+            runtime_slot("bearer_token", SlotLocation::Auth, true, None),
+            runtime_slot("user_id", SlotLocation::Path, true, Some("42")),
+        ]);
+        let mut secret_store = MemorySecretStore::default();
+        secret_store.set(
+            "bearer_token",
+            SecretString::new(
+                "safe_snapshot_auth_secret_should_not_leak"
+                    .to_string()
+                    .into(),
+            ),
+        );
+
+        hydrate_auth_slots(&mut execution_draft, &secret_store);
+        assert!(
+            execution_draft
+                .slots
+                .iter()
+                .any(|slot| slot.location == SlotLocation::Auth && slot.current_value.is_some())
+        );
+
+        let snapshot = safe_executed_draft_snapshot(&execution_draft);
+
+        assert!(
+            snapshot
+                .slots
+                .iter()
+                .any(|slot| slot.location == SlotLocation::Auth && slot.current_value.is_none())
+        );
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .expect("snapshot json")
+                .contains("safe_snapshot_auth_secret_should_not_leak")
+        );
+    }
+
+    #[test]
+    fn recipe_creation_uses_executed_snapshot_not_later_mutated_working_draft() {
+        let executed_draft = safe_executed_draft_snapshot(&draft_with_path("/executed"));
+        let mut edited_draft = draft_with_path("/edited");
+        edited_draft.name = "Edited Builder Draft".to_string();
+        let result = success_result("/executed");
+        let mut app = app_with_working_draft(edited_draft);
+        app.last_execution = Some(result);
+        app.last_successful_draft = Some(executed_draft);
+
+        app.save_current_recipe();
+
+        let recipes = app.repository.list_recipes().expect("recipes");
+        assert_eq!(recipes.len(), 1);
+        let recipe = app
+            .repository
+            .get_recipe(recipes[0].id)
+            .expect("recipe")
+            .expect("saved recipe");
+        assert!(recipe.url_template.ends_with("/executed"));
+        assert!(!recipe.url_template.ends_with("/edited"));
+    }
+
+    #[test]
+    fn attempt_construction_uses_provided_executed_snapshot_and_evidence() {
+        let mut executed_draft = draft_with_path("/executed-attempt");
+        executed_draft.evidence.push(EvidenceItem {
+            source_kind: SourceKind::Curl,
+            label: "executed evidence".to_string(),
+            detail: "safe fixed evidence".to_string(),
+            confidence: Confidence::High,
+        });
+        let result = success_result("/executed-attempt");
+
+        let attempt = attempt_from_executed_draft(
+            &executed_draft,
+            &result,
+            vec![SourceInput {
+                kind: SourceKind::Curl,
+                raw_text: "Authorization: Bearer attempt_secret_should_not_leak".to_string(),
+            }],
+        );
+
+        assert_eq!(attempt.request_draft_snapshot.path, "/executed-attempt");
+        assert!(attempt.evidence_summary.contains("executed evidence"));
+        assert!(
+            !serde_json::to_string(&attempt)
+                .expect("attempt json")
+                .contains("attempt_secret_should_not_leak")
+        );
+    }
+
+    #[test]
+    fn blocked_missing_slot_run_does_not_start_or_update_execution_state() {
+        let draft = draft_with_slots(vec![
+            runtime_slot("bearer_token", SlotLocation::Auth, true, None),
+            runtime_slot("user_id", SlotLocation::Path, true, None),
+        ]);
+        let mut app = app_with_working_draft(draft);
+
+        app.run_current_draft();
+
+        assert!(app.running_execution.is_none());
+        assert!(app.last_execution.is_none());
+        assert!(app.last_successful_draft.is_none());
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Cannot run request: missing required runtime slot(s):")
+        );
+    }
+
     fn draft_with_slots(slots: Vec<RuntimeSlot>) -> RequestDraft {
         RequestDraft {
             operation_id: "test-operation".to_string(),
@@ -965,6 +1128,74 @@ mod tests {
             response_schema: None,
             unsupported_reason: None,
             source_kinds: vec![SourceKind::Curl],
+        }
+    }
+
+    fn draft_with_path(path: &str) -> RequestDraft {
+        let mut draft = draft_with_slots(vec![
+            runtime_slot("bearer_token", SlotLocation::Auth, true, None),
+            runtime_slot("user_id", SlotLocation::Path, true, Some("42")),
+        ]);
+        draft.path = path.to_string();
+        draft
+    }
+
+    fn success_result(path: &str) -> ExecutionResult {
+        ExecutionResult {
+            rendered_request: RenderedRequest {
+                method: "GET".to_string(),
+                url: format!("https://api.example.com{path}"),
+                headers: Vec::new(),
+                body_preview: None,
+            },
+            response_snapshot: Some(ResponseSnapshot {
+                status: Some(200),
+                headers: Vec::new(),
+                body_preview: "{}".to_string(),
+                elapsed_ms: 1,
+                validation_errors: Vec::new(),
+                transport_error: None,
+            }),
+            outcome: Outcome::Success,
+            blocker: None,
+            notes: "Request executed".to_string(),
+        }
+    }
+
+    fn app_with_working_draft(draft: RequestDraft) -> FirstCallApp {
+        let connection = Connection::open_in_memory().expect("in-memory sqlite");
+        run_migrations(&connection).expect("migrations");
+        let secret_store = Box::new(MemorySecretStore::default());
+        let secret_status = secret_store.status();
+
+        FirstCallApp {
+            screen: TopScreen::NewAttempt,
+            inputs: InputBuffers::default(),
+            parsed_sources: Vec::new(),
+            candidate_drafts: Vec::new(),
+            selected_candidate: None,
+            working_draft: Some(draft),
+            last_execution: None,
+            last_successful_draft: None,
+            attempts: Vec::new(),
+            selected_attempt_id: None,
+            recipes: Vec::new(),
+            recipe_search: String::new(),
+            auth_slot_inputs: BTreeMap::new(),
+            settings: AppSettings::default(),
+            paths: AppPaths {
+                data_dir: PathBuf::new(),
+                config_dir: PathBuf::new(),
+                exports_dir: PathBuf::new(),
+                db_path: PathBuf::new(),
+            },
+            repository: AppRepository::new(connection),
+            secret_store,
+            secret_status,
+            http_client: Client::new(),
+            status_message: None,
+            bootstrap_warning: None,
+            running_execution: None,
         }
     }
 
