@@ -102,6 +102,20 @@ Use this as a local human smoke pass for the desktop workbench:
 - The Recipes screen shows CLI lifecycle hints without executing them.
 - The Settings screen explains the secret backend and that CLI verification remains environment-first.
 
+## Demo Asset Refresh Checklist
+
+Use this when README demo assets may have drifted:
+
+- The GUI demo GIF still matches the current FirstCall desktop GUI.
+- The CLI demo GIF still matches current `firstcall-cli` behavior.
+- `docs/assets/firstcall-cli.cast` commands match the displayed output mode.
+- If the cast uses `--json`, output must be JSON-shaped.
+- If the cast shows human-readable summaries, commands should not include `--json`.
+- README demo links render correctly.
+- Demo assets do not include secrets, real tokens, private URLs, or user-specific paths.
+- Demo assets should be refreshed after major GUI flow or CLI lifecycle output changes.
+- Demo refresh is not required for every code-only change.
+
 ## Non-Goals For Release Validation
 
 Do not run or require:

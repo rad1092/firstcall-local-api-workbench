@@ -1,8 +1,8 @@
 {"env":{"SHELL":"powershell","TERM":"xterm-256color"},"timestamp":1778224121,"width":96,"version":2,"height":24}
 [0.8,"o","$ firstcall-cli version\nfirstcall-cli 0.1.0\n"]
 [1.6,"o","$ firstcall-cli package --recipe-json fixtures/verified-agent-recipe.json --out ./dist/demo-agent-tool\nExported agent package to ./dist/demo-agent-tool\n"]
-[2.4,"o","$ firstcall-cli validate-package --dir ./dist/demo-agent-tool --json\nstatus: valid\nchecks_passed: 112\nerrors: 0\n"]
-[3.2,"o","$ firstcall-cli inspect-package --dir ./dist/demo-agent-tool --json\nimport_readiness: ready\nlegacy_package: false\n"]
-[4.0,"o","$ firstcall-cli import-package --dir ./dist/demo-agent-tool --json\nimport_status: imported\nimported_recipe_id: 1\nrequires_local_re_verification: true\n"]
-[4.8,"o","$ firstcall-cli recipe-list --json\nrecipes: 1\nfirst: example_update_user\n"]
-[5.6,"o","$ firstcall-cli verify --recipe-id 1 --allow-mutating --dry-run --json\npreflight_status: ready\nwould_execute_http: false\nrequired_env: 4\n"]
+[2.4,"o","$ firstcall-cli validate-package --dir ./dist/demo-agent-tool\nstatus: valid\nchecks_passed: 112\nerrors: 0\n"]
+[3.2,"o","$ firstcall-cli inspect-package --dir ./dist/demo-agent-tool\nimport_readiness: ready\nlegacy_package: false\n"]
+[4.0,"o","$ firstcall-cli import-package --dir ./dist/demo-agent-tool\nimport_status: imported\nimported_recipe_id: 1\nrequires_local_re_verification: true\n"]
+[4.8,"o","$ firstcall-cli recipe-list\nrecipes: 1\nfirst: example_update_user\n"]
+[5.6,"o","$ firstcall-cli verify --recipe-id 1 --allow-mutating --dry-run\npreflight_status: ready\nwould_execute_http: false\nrequired_env: 4\n"]
