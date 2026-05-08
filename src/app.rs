@@ -17,7 +17,7 @@ use crate::export::{curl::recipe_to_curl, json::recipe_to_json, markdown::recipe
 use crate::merge::merge_parsed_sources;
 use crate::model::{
     AppSettings, AttemptListItem, ExecutionResult, Outcome, ParsedSource, Recipe, RecipeListItem,
-    RequestAttempt, RequestDraft, RuntimeSlot, SlotLocation, SourceKind,
+    RequestAttempt, RequestDraft, RuntimeSlot, SlotLocation, SourceInput, SourceKind,
 };
 use crate::parse::{
     bruno::parse_bruno_input, curl::parse_curl_input, docs::parse_docs_input, har::parse_har_input,
@@ -189,6 +189,7 @@ impl Default for InputBuffers {
 struct RunningExecution {
     receiver: Receiver<ExecutionResult>,
     draft_snapshot: RequestDraft,
+    source_inputs_snapshot: Vec<SourceInput>,
 }
 
 pub struct FirstCallApp {
@@ -256,7 +257,10 @@ impl FirstCallApp {
     }
 
     pub fn analyze_inputs(&mut self) {
-        self.clear_execution_state();
+        if self.context_change_blocked_while_running() {
+            return;
+        }
+        self.clear_completed_execution_state();
         self.parsed_sources = parse_input_buffers(&self.inputs);
         self.candidate_drafts = merge_parsed_sources(&self.parsed_sources);
         self.selected_candidate = if self.candidate_drafts.is_empty() {
@@ -282,8 +286,11 @@ impl FirstCallApp {
     }
 
     pub fn select_candidate(&mut self, index: usize) {
+        if self.context_change_blocked_while_running() {
+            return;
+        }
         if let Some(candidate) = self.candidate_drafts.get(index).cloned() {
-            self.clear_execution_state();
+            self.clear_completed_execution_state();
             self.selected_candidate = Some(index);
             self.working_draft = Some(candidate);
             if let Some(draft) = &mut self.working_draft {
@@ -294,6 +301,9 @@ impl FirstCallApp {
     }
 
     pub fn reset_inputs(&mut self) {
+        if self.context_change_blocked_while_running() {
+            return;
+        }
         self.inputs = InputBuffers {
             active_tab: InputTab::Curl,
             ..InputBuffers::default()
@@ -302,13 +312,14 @@ impl FirstCallApp {
         self.candidate_drafts.clear();
         self.selected_candidate = None;
         self.working_draft = None;
-        self.last_execution = None;
-        self.last_successful_draft = None;
-        self.running_execution = None;
+        self.clear_completed_execution_state();
         self.auth_slot_inputs.clear();
     }
 
     pub fn load_sample_for_active_tab(&mut self) {
+        if self.context_change_blocked_while_running() {
+            return;
+        }
         match self.inputs.active_tab {
             InputTab::Curl => self.inputs.curl = SAMPLE_CURL.to_string(),
             InputTab::Docs => self.inputs.docs = SAMPLE_DOCS.to_string(),
@@ -347,12 +358,16 @@ impl FirstCallApp {
         }
 
         let safe_executed_draft_snapshot = safe_executed_draft_snapshot(&draft);
+        let source_inputs_snapshot =
+            safe_source_inputs_for_execution(&self.parsed_sources, &self.inputs);
         let settings = self.settings.clone();
         let client = self.http_client.clone();
         let (sender, receiver) = mpsc::channel();
+        self.clear_completed_execution_state();
         self.running_execution = Some(RunningExecution {
             receiver,
             draft_snapshot: safe_executed_draft_snapshot,
+            source_inputs_snapshot,
         });
         self.status_message = Some("Running request...".to_string());
         std::thread::spawn(move || {
@@ -366,21 +381,23 @@ impl FirstCallApp {
             let Some(running) = &self.running_execution else {
                 return;
             };
-            running
-                .receiver
-                .try_recv()
-                .ok()
-                .map(|result| (running.draft_snapshot.clone(), result))
+            running.receiver.try_recv().ok().map(|result| {
+                (
+                    running.draft_snapshot.clone(),
+                    running.source_inputs_snapshot.clone(),
+                    result,
+                )
+            })
         };
 
-        if let Some((draft_snapshot, result)) = received {
+        if let Some((draft_snapshot, source_inputs_snapshot, result)) = received {
             self.running_execution = None;
             self.last_successful_draft = if result.outcome == Outcome::Success {
                 Some(draft_snapshot.clone())
             } else {
                 None
             };
-            self.persist_latest_attempt(&draft_snapshot, &result);
+            self.persist_latest_attempt(&draft_snapshot, &result, source_inputs_snapshot);
             self.last_execution = Some(result);
             self.refresh_lists();
             if let Some(result) = &self.last_execution {
@@ -414,8 +431,11 @@ impl FirstCallApp {
     }
 
     pub fn reopen_attempt(&mut self, id: i64) {
+        if self.context_change_blocked_while_running() {
+            return;
+        }
         if let Ok(Some(attempt)) = self.repository.get_attempt(id) {
-            self.clear_execution_state();
+            self.clear_completed_execution_state();
             self.inputs = InputBuffers::default();
             let mut first_tab = None;
             for source in &attempt.source_inputs {
@@ -437,8 +457,11 @@ impl FirstCallApp {
     }
 
     pub fn rerun_recipe(&mut self, id: i64) {
+        if self.context_change_blocked_while_running() {
+            return;
+        }
         if let Ok(Some(recipe)) = self.repository.get_recipe(id) {
-            self.clear_execution_state();
+            self.clear_completed_execution_state();
             self.working_draft = Some(recipe_to_draft(recipe));
             if let Some(draft) = &mut self.working_draft {
                 clear_visible_auth_slots(draft);
@@ -524,12 +547,13 @@ impl FirstCallApp {
         }
     }
 
-    fn persist_latest_attempt(&mut self, executed_draft: &RequestDraft, result: &ExecutionResult) {
-        let attempt = attempt_from_executed_draft(
-            executed_draft,
-            result,
-            safe_source_inputs(&self.parsed_sources, &self.inputs),
-        );
+    fn persist_latest_attempt(
+        &mut self,
+        executed_draft: &RequestDraft,
+        result: &ExecutionResult,
+        source_inputs_snapshot: Vec<SourceInput>,
+    ) {
+        let attempt = attempt_from_executed_draft(executed_draft, result, source_inputs_snapshot);
         if let Err(error) = self.repository.insert_attempt(&attempt) {
             self.status_message = Some(format!("Could not persist attempt: {error}"));
         }
@@ -579,10 +603,20 @@ impl FirstCallApp {
         }
     }
 
-    fn clear_execution_state(&mut self) {
+    fn context_change_blocked_while_running(&mut self) -> bool {
+        if self.is_running() {
+            self.status_message = Some(
+                "A request is currently running; wait for it to finish before changing inputs or candidates."
+                    .to_string(),
+            );
+            return true;
+        }
+        false
+    }
+
+    fn clear_completed_execution_state(&mut self) {
         self.last_execution = None;
         self.last_successful_draft = None;
-        self.running_execution = None;
     }
 }
 
@@ -682,10 +716,7 @@ fn parse_input_buffers(inputs: &InputBuffers) -> Vec<ParsedSource> {
     parsed
 }
 
-fn safe_source_inputs(
-    parsed_sources: &[ParsedSource],
-    inputs: &InputBuffers,
-) -> Vec<crate::model::SourceInput> {
+fn safe_source_inputs(parsed_sources: &[ParsedSource], inputs: &InputBuffers) -> Vec<SourceInput> {
     if !parsed_sources.is_empty() {
         return parsed_sources
             .iter()
@@ -707,6 +738,21 @@ fn current_source_inputs(inputs: &InputBuffers) -> Vec<crate::model::SourceInput
         }
     }
     sources
+}
+
+fn safe_source_inputs_for_execution(
+    parsed_sources: &[ParsedSource],
+    inputs: &InputBuffers,
+) -> Vec<SourceInput> {
+    safe_source_inputs(parsed_sources, inputs)
+        .into_iter()
+        .map(redact_source_input)
+        .collect()
+}
+
+fn redact_source_input(mut input: SourceInput) -> SourceInput {
+    input.raw_text = redact_free_text(&input.raw_text);
+    input
 }
 
 fn input_tab_for_source_kind(kind: &SourceKind) -> Option<InputTab> {
@@ -838,13 +884,7 @@ fn attempt_from_executed_draft(
     RequestAttempt {
         id: None,
         created_at: Utc::now(),
-        source_inputs: source_inputs
-            .into_iter()
-            .map(|mut input| {
-                input.raw_text = redact_free_text(&input.raw_text);
-                input
-            })
-            .collect(),
+        source_inputs: source_inputs.into_iter().map(redact_source_input).collect(),
         request_draft_snapshot: safe_executed_draft_snapshot(executed_draft),
         rendered_request_redacted: redact_request(&result.rendered_request),
         response_snapshot_redacted: result.response_snapshot.as_ref().map(redact_response),
@@ -911,6 +951,7 @@ fn slot_has_runtime_value(
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::mpsc;
 
     use secrecy::SecretString;
 
@@ -1085,6 +1126,120 @@ mod tests {
     }
 
     #[test]
+    fn safe_source_inputs_for_execution_prefers_parsed_source_and_redacts() {
+        let parsed_sources = vec![ParsedSource {
+            source: SourceInput {
+                kind: SourceKind::Har,
+                raw_text: "Authorization: Bearer source_snapshot_secret_should_not_leak\nGET https://parsed.example.com".to_string(),
+            },
+            candidates: Vec::new(),
+            notes: Vec::new(),
+        }];
+        let inputs = InputBuffers {
+            curl: "GET https://fallback.example.com".to_string(),
+            ..InputBuffers::default()
+        };
+
+        let snapshot = safe_source_inputs_for_execution(&parsed_sources, &inputs);
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].kind, SourceKind::Har);
+        assert!(snapshot[0].raw_text.contains("parsed.example.com"));
+        assert!(!snapshot[0].raw_text.contains("fallback.example.com"));
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .expect("snapshot json")
+                .contains("source_snapshot_secret_should_not_leak")
+        );
+    }
+
+    #[test]
+    fn safe_source_inputs_for_execution_redacts_fallback_buffers() {
+        let inputs = InputBuffers {
+            curl: "Authorization: Bearer fallback_source_secret_should_not_leak\ncurl https://fallback.example.com".to_string(),
+            ..InputBuffers::default()
+        };
+
+        let snapshot = safe_source_inputs_for_execution(&[], &inputs);
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].kind, SourceKind::Curl);
+        assert!(snapshot[0].raw_text.contains("fallback.example.com"));
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .expect("snapshot json")
+                .contains("fallback_source_secret_should_not_leak")
+        );
+    }
+
+    #[test]
+    fn poll_execution_persists_run_start_source_snapshot_after_buffers_mutate() {
+        let executed_draft = safe_executed_draft_snapshot(&draft_with_path("/source-snapshot"));
+        let run_start_inputs = InputBuffers {
+            curl: "Authorization: Bearer run_start_source_secret_should_not_leak\ncurl https://run-start.example.com".to_string(),
+            ..InputBuffers::default()
+        };
+        let source_inputs_snapshot = safe_source_inputs_for_execution(&[], &run_start_inputs);
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(success_result("/source-snapshot"))
+            .expect("send result");
+
+        let mut app = app_with_working_draft(draft_with_path("/edited-later"));
+        app.inputs.curl = "Authorization: Bearer current_buffer_secret_should_not_leak\ncurl https://current-buffer.example.com".to_string();
+        app.running_execution = Some(RunningExecution {
+            receiver,
+            draft_snapshot: executed_draft,
+            source_inputs_snapshot,
+        });
+
+        app.poll_execution();
+
+        assert!(app.running_execution.is_none());
+        let attempts = app.repository.list_attempts().expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        let attempt = app
+            .repository
+            .get_attempt(attempts[0].id)
+            .expect("attempt")
+            .expect("persisted attempt");
+        let attempt_json = serde_json::to_string(&attempt).expect("attempt json");
+        assert!(attempt_json.contains("run-start.example.com"));
+        assert!(!attempt_json.contains("current-buffer.example.com"));
+        assert!(!attempt_json.contains("run_start_source_secret_should_not_leak"));
+        assert!(!attempt_json.contains("current_buffer_secret_should_not_leak"));
+    }
+
+    #[test]
+    fn persist_latest_attempt_uses_provided_source_snapshot_not_current_buffers() {
+        let mut app = app_with_working_draft(draft_with_path("/persist-source"));
+        app.inputs.curl = "Authorization: Bearer persist_current_secret_should_not_leak\ncurl https://current-buffer.example.com".to_string();
+        let source_inputs_snapshot = vec![SourceInput {
+            kind: SourceKind::Curl,
+            raw_text: "Authorization: Bearer persist_snapshot_secret_should_not_leak\ncurl https://provided-snapshot.example.com".to_string(),
+        }];
+
+        app.persist_latest_attempt(
+            &draft_with_path("/persist-source"),
+            &success_result("/persist-source"),
+            source_inputs_snapshot,
+        );
+
+        let attempts = app.repository.list_attempts().expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        let attempt = app
+            .repository
+            .get_attempt(attempts[0].id)
+            .expect("attempt")
+            .expect("persisted attempt");
+        let attempt_json = serde_json::to_string(&attempt).expect("attempt json");
+        assert!(attempt_json.contains("provided-snapshot.example.com"));
+        assert!(!attempt_json.contains("current-buffer.example.com"));
+        assert!(!attempt_json.contains("persist_snapshot_secret_should_not_leak"));
+        assert!(!attempt_json.contains("persist_current_secret_should_not_leak"));
+    }
+
+    #[test]
     fn blocked_missing_slot_run_does_not_start_or_update_execution_state() {
         let draft = draft_with_slots(vec![
             runtime_slot("bearer_token", SlotLocation::Auth, true, None),
@@ -1102,6 +1257,59 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("Cannot run request: missing required runtime slot(s):")
+        );
+    }
+
+    #[test]
+    fn analyze_inputs_while_running_does_not_clear_running_execution() {
+        let mut app = app_with_working_draft(draft_with_path("/running"));
+        app.inputs.curl = "curl https://before.example.com".to_string();
+        app.running_execution = Some(running_execution_with_path("/running"));
+
+        app.analyze_inputs();
+
+        assert!(app.running_execution.is_some());
+        assert!(app.parsed_sources.is_empty());
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("A request is currently running")
+        );
+    }
+
+    #[test]
+    fn select_candidate_while_running_does_not_change_working_draft() {
+        let current = draft_with_path("/current");
+        let next = draft_with_path("/next");
+        let mut app = app_with_working_draft(current);
+        app.selected_candidate = Some(0);
+        app.candidate_drafts = vec![draft_with_path("/current"), next];
+        app.running_execution = Some(running_execution_with_path("/current"));
+
+        app.select_candidate(1);
+
+        assert!(app.running_execution.is_some());
+        assert_eq!(app.selected_candidate, Some(0));
+        assert_eq!(
+            app.working_draft.as_ref().map(|draft| draft.path.as_str()),
+            Some("/current")
+        );
+    }
+
+    #[test]
+    fn reset_inputs_while_running_does_not_drop_receiver_or_mutate_context() {
+        let mut app = app_with_working_draft(draft_with_path("/running-reset"));
+        app.inputs.curl = "curl https://before-reset.example.com".to_string();
+        app.running_execution = Some(running_execution_with_path("/running-reset"));
+
+        app.reset_inputs();
+
+        assert!(app.running_execution.is_some());
+        assert_eq!(app.inputs.curl, "curl https://before-reset.example.com");
+        assert_eq!(
+            app.working_draft.as_ref().map(|draft| draft.path.as_str()),
+            Some("/running-reset")
         );
     }
 
@@ -1196,6 +1404,18 @@ mod tests {
             status_message: None,
             bootstrap_warning: None,
             running_execution: None,
+        }
+    }
+
+    fn running_execution_with_path(path: &str) -> RunningExecution {
+        let (_sender, receiver) = mpsc::channel();
+        RunningExecution {
+            receiver,
+            draft_snapshot: safe_executed_draft_snapshot(&draft_with_path(path)),
+            source_inputs_snapshot: vec![SourceInput {
+                kind: SourceKind::Curl,
+                raw_text: "curl https://run-start.example.com".to_string(),
+            }],
         }
     }
 

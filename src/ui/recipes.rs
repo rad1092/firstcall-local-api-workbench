@@ -4,6 +4,7 @@ use crate::app::FirstCallApp;
 
 impl FirstCallApp {
     pub(crate) fn render_recipes(&mut self, root_ui: &mut egui::Ui) {
+        let is_running = self.is_running();
         egui::CentralPanel::default().show_inside(root_ui, |ui| {
             ui.heading("Recipes");
             ui.horizontal(|ui| {
@@ -50,7 +51,10 @@ impl FirstCallApp {
                         ));
                         ui.monospace(&recipe.url_template);
                         ui.horizontal(|ui| {
-                            if ui.button("Rerun").clicked() {
+                            if ui
+                                .add_enabled(!is_running, egui::Button::new("Rerun"))
+                                .clicked()
+                            {
                                 self.rerun_recipe(recipe.id);
                             }
                             if ui.button("Copy As Curl").clicked() {

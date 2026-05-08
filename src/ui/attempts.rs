@@ -4,6 +4,7 @@ use crate::app::FirstCallApp;
 
 impl FirstCallApp {
     pub(crate) fn render_attempts(&mut self, root_ui: &mut egui::Ui) {
+        let is_running = self.is_running();
         egui::Panel::left("attempts_list")
             .resizable(true)
             .default_size(390.0)
@@ -41,10 +42,16 @@ impl FirstCallApp {
                             });
                             ui.small(attempt.created_at.to_rfc3339());
                             ui.horizontal(|ui| {
-                                if ui.button("Reopen").clicked() {
+                                if ui
+                                    .add_enabled(!is_running, egui::Button::new("Reopen"))
+                                    .clicked()
+                                {
                                     self.reopen_attempt(attempt.id);
                                 }
-                                if ui.button("Retry").clicked() {
+                                if ui
+                                    .add_enabled(!is_running, egui::Button::new("Retry"))
+                                    .clicked()
+                                {
                                     self.reopen_attempt(attempt.id);
                                     self.run_current_draft();
                                 }

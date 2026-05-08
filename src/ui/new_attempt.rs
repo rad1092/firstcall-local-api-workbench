@@ -8,34 +8,43 @@ use crate::model::{BodyTemplate, HeaderField, KeyValueField, Outcome, SlotLocati
 
 impl FirstCallApp {
     pub(crate) fn render_new_attempt(&mut self, root_ui: &mut egui::Ui) {
+        let is_running = self.is_running();
         egui::Panel::left("new_attempt_inputs")
             .resizable(true)
             .default_size(360.0)
             .show_inside(root_ui, |ui| {
                 ui.heading("Request Sources");
-                egui::ComboBox::from_label("Source kind")
-                    .selected_text(self.inputs.active_tab.label())
-                    .show_ui(ui, |ui| {
-                        for tab in InputTab::ALL {
-                            ui.selectable_value(&mut self.inputs.active_tab, tab, tab.label());
-                        }
-                    });
+                ui.add_enabled_ui(!is_running, |ui| {
+                    egui::ComboBox::from_label("Source kind")
+                        .selected_text(self.inputs.active_tab.label())
+                        .show_ui(ui, |ui| {
+                            for tab in InputTab::ALL {
+                                ui.selectable_value(&mut self.inputs.active_tab, tab, tab.label());
+                            }
+                        });
+                });
                 ui.small(self.inputs.active_tab.description());
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
-                            self.inputs.active_tab.has_sample(),
+                            !is_running && self.inputs.active_tab.has_sample(),
                             egui::Button::new("Load Sample"),
                         )
                         .clicked()
                     {
                         self.load_sample_for_active_tab();
                     }
-                    if ui.button("Analyze Sources").clicked() {
+                    if ui
+                        .add_enabled(!is_running, egui::Button::new("Analyze Sources"))
+                        .clicked()
+                    {
                         self.analyze_inputs();
                     }
-                    if ui.button("Reset").clicked() {
+                    if ui
+                        .add_enabled(!is_running, egui::Button::new("Reset"))
+                        .clicked()
+                    {
                         self.reset_inputs();
                     }
                 });
@@ -43,11 +52,13 @@ impl FirstCallApp {
                 let active_tab = self.inputs.active_tab;
                 let hint = active_tab.hint();
                 let buffer = self.inputs.buffer_mut(active_tab);
-                ui.add(
-                    egui::TextEdit::multiline(buffer)
-                        .desired_rows(24)
-                        .hint_text(hint),
-                );
+                ui.add_enabled_ui(!is_running, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(buffer)
+                            .desired_rows(24)
+                            .hint_text(hint),
+                    );
+                });
                 ui.separator();
                 ui.label("Parse notes");
                 egui::ScrollArea::vertical()
@@ -146,14 +157,15 @@ impl FirstCallApp {
                                             .entry(slot.name.clone())
                                             .or_default();
                                         ui.horizontal(|ui| {
-                                            ui.add(
+                                            ui.add_enabled(
+                                                !is_running,
                                                 egui::TextEdit::singleline(entry)
                                                     .password(true)
                                                     .hint_text("enter secret value"),
                                             );
                                             if ui
                                                 .add_enabled(
-                                                    !entry.trim().is_empty(),
+                                                    !is_running && !entry.trim().is_empty(),
                                                     egui::Button::new("Save secret"),
                                                 )
                                                 .clicked()
@@ -164,7 +176,13 @@ impl FirstCallApp {
                                     } else {
                                         let mut value =
                                             slot.current_value.clone().unwrap_or_default();
-                                        if ui.text_edit_singleline(&mut value).changed() {
+                                        if ui
+                                            .add_enabled(
+                                                !is_running,
+                                                egui::TextEdit::singleline(&mut value),
+                                            )
+                                            .changed()
+                                        {
                                             let next_value = if value.trim().is_empty() {
                                                 None
                                             } else {
@@ -194,14 +212,16 @@ impl FirstCallApp {
                         self.auth_slot_inputs.remove(&slot_name);
                     }
 
-                    let can_run = !self.is_running();
                     if ui
-                        .add_enabled(can_run, egui::Button::new("Run Request"))
+                        .add_enabled(!is_running, egui::Button::new("Run Request"))
                         .clicked()
                     {
                         self.run_current_draft();
                     }
-                    if ui.button("Save Successful Recipe").clicked() {
+                    if ui
+                        .add_enabled(!is_running, egui::Button::new("Save Successful Recipe"))
+                        .clicked()
+                    {
                         self.save_current_recipe();
                     }
                 } else {
@@ -234,16 +254,19 @@ impl FirstCallApp {
                             .collect::<Vec<_>>()
                             .join(", ");
                         if ui
-                            .selectable_label(
-                                selected,
-                                format!(
-                                    "{} [{}] {}",
-                                    candidate.endpoint_summary(),
-                                    candidate.confidence.overall.label(),
-                                    source_kinds
-                                ),
-                            )
-                            .clicked()
+                            .add_enabled_ui(!is_running, |ui| {
+                                ui.selectable_label(
+                                    selected,
+                                    format!(
+                                        "{} [{}] {}",
+                                        candidate.endpoint_summary(),
+                                        candidate.confidence.overall.label(),
+                                        source_kinds
+                                    ),
+                                )
+                                .clicked()
+                            })
+                            .inner
                         {
                             self.select_candidate(index);
                         }
@@ -272,34 +295,36 @@ impl FirstCallApp {
                 }
                 ui.separator();
 
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.text_edit_singleline(&mut draft.name);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Method");
-                    ui.text_edit_singleline(&mut draft.method);
-                    ui.label("Base URL");
-                    if draft.base_url.is_none() {
-                        draft.base_url = Some(String::new());
-                    }
-                    if let Some(base_url) = &mut draft.base_url {
-                        ui.text_edit_singleline(base_url);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Path");
-                    ui.text_edit_singleline(&mut draft.path);
-                });
+                ui.add_enabled_ui(!is_running, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name");
+                        ui.text_edit_singleline(&mut draft.name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Method");
+                        ui.text_edit_singleline(&mut draft.method);
+                        ui.label("Base URL");
+                        if draft.base_url.is_none() {
+                            draft.base_url = Some(String::new());
+                        }
+                        if let Some(base_url) = &mut draft.base_url {
+                            ui.text_edit_singleline(base_url);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Path");
+                        ui.text_edit_singleline(&mut draft.path);
+                    });
 
-                ui.collapsing("Headers", |ui| {
-                    edit_headers(ui, &mut draft.headers);
-                });
-                ui.collapsing("Query", |ui| {
-                    edit_query(ui, &mut draft.query);
-                });
-                ui.collapsing("Body", |ui| {
-                    edit_body(ui, &mut draft.body);
+                    ui.collapsing("Headers", |ui| {
+                        edit_headers(ui, &mut draft.headers);
+                    });
+                    ui.collapsing("Query", |ui| {
+                        edit_query(ui, &mut draft.query);
+                    });
+                    ui.collapsing("Body", |ui| {
+                        edit_body(ui, &mut draft.body);
+                    });
                 });
 
                 ui.separator();
