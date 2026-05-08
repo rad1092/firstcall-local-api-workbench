@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -16,9 +17,13 @@ use crate::export::{curl::recipe_to_curl, json::recipe_to_json, markdown::recipe
 use crate::merge::merge_parsed_sources;
 use crate::model::{
     AppSettings, AttemptListItem, ExecutionResult, Outcome, ParsedSource, Recipe, RecipeListItem,
-    RequestAttempt, RequestDraft,
+    RequestAttempt, RequestDraft, RuntimeSlot, SlotLocation, SourceKind,
 };
-use crate::parse::{curl::parse_curl_input, docs::parse_docs_input, openapi::parse_openapi_input};
+use crate::parse::{
+    bruno::parse_bruno_input, curl::parse_curl_input, docs::parse_docs_input, har::parse_har_input,
+    http_file::parse_http_file_input, hurl::parse_hurl_input, openapi::parse_openapi_input,
+    postman::parse_postman_collection_input,
+};
 use crate::store::db::{AppPaths, open_database};
 use crate::store::migrations::run_migrations;
 use crate::store::repos::AppRepository;
@@ -39,13 +44,130 @@ pub enum InputTab {
     Curl,
     Docs,
     OpenApi,
+    PostmanCollection,
+    Har,
+    HttpFile,
+    Hurl,
+    Bruno,
+}
+
+impl InputTab {
+    pub const ALL: [Self; 8] = [
+        Self::Curl,
+        Self::Docs,
+        Self::OpenApi,
+        Self::PostmanCollection,
+        Self::Har,
+        Self::HttpFile,
+        Self::Hurl,
+        Self::Bruno,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Curl => "curl",
+            Self::Docs => "Docs",
+            Self::OpenApi => "OpenAPI",
+            Self::PostmanCollection => "Postman Collection",
+            Self::Har => "HAR",
+            Self::HttpFile => ".http / .rest",
+            Self::Hurl => "Hurl",
+            Self::Bruno => "Bruno / OpenCollection",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Curl => "Paste a curl command. Curl evidence has highest merge precedence.",
+            Self::Docs => "Paste docs prose. Docs are used as low-precedence supporting evidence.",
+            Self::OpenApi => {
+                "Paste OpenAPI JSON or YAML. Local refs are supported by core parsers."
+            }
+            Self::PostmanCollection => {
+                "Static import only. Pre-request scripts and tests are ignored."
+            }
+            Self::Har => {
+                "Browser capture import with aggressive redaction. Response bodies are not imported."
+            }
+            Self::HttpFile => {
+                "Static .http/.rest request parsing. Environments and scripts are not executed."
+            }
+            Self::Hurl => "Request-only subset. Response asserts and captures are ignored.",
+            Self::Bruno => {
+                "Limited static Bruno/OpenCollection subset. Scripts and runtime hooks are ignored."
+            }
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Curl => "Paste a curl command here",
+            Self::Docs => "Paste API docs prose here",
+            Self::OpenApi => "Paste OpenAPI JSON or YAML here",
+            Self::PostmanCollection => "Paste a Postman Collection v2.1 JSON document here",
+            Self::Har => "Paste a HAR JSON document here",
+            Self::HttpFile => "Paste a JetBrains-style .http or .rest file here",
+            Self::Hurl => "Paste a Hurl request-only file here",
+            Self::Bruno => "Paste a .bru file or OpenCollection YAML request here",
+        }
+    }
+
+    pub fn source_kind(self) -> SourceKind {
+        match self {
+            Self::Curl => SourceKind::Curl,
+            Self::Docs => SourceKind::Docs,
+            Self::OpenApi => SourceKind::OpenApi,
+            Self::PostmanCollection => SourceKind::PostmanCollection,
+            Self::Har => SourceKind::Har,
+            Self::HttpFile => SourceKind::HttpFile,
+            Self::Hurl => SourceKind::Hurl,
+            Self::Bruno => SourceKind::Bruno,
+        }
+    }
+
+    pub fn has_sample(self) -> bool {
+        matches!(self, Self::Curl | Self::Docs | Self::OpenApi)
+    }
 }
 
 pub struct InputBuffers {
     pub curl: String,
     pub docs: String,
     pub openapi: String,
+    pub postman: String,
+    pub har: String,
+    pub http_file: String,
+    pub hurl: String,
+    pub bruno: String,
     pub active_tab: InputTab,
+}
+
+impl InputBuffers {
+    pub fn buffer(&self, tab: InputTab) -> &str {
+        match tab {
+            InputTab::Curl => &self.curl,
+            InputTab::Docs => &self.docs,
+            InputTab::OpenApi => &self.openapi,
+            InputTab::PostmanCollection => &self.postman,
+            InputTab::Har => &self.har,
+            InputTab::HttpFile => &self.http_file,
+            InputTab::Hurl => &self.hurl,
+            InputTab::Bruno => &self.bruno,
+        }
+    }
+
+    pub fn buffer_mut(&mut self, tab: InputTab) -> &mut String {
+        match tab {
+            InputTab::Curl => &mut self.curl,
+            InputTab::Docs => &mut self.docs,
+            InputTab::OpenApi => &mut self.openapi,
+            InputTab::PostmanCollection => &mut self.postman,
+            InputTab::Har => &mut self.har,
+            InputTab::HttpFile => &mut self.http_file,
+            InputTab::Hurl => &mut self.hurl,
+            InputTab::Bruno => &mut self.bruno,
+        }
+    }
 }
 
 impl Default for InputBuffers {
@@ -54,6 +176,11 @@ impl Default for InputBuffers {
             curl: String::new(),
             docs: String::new(),
             openapi: String::new(),
+            postman: String::new(),
+            har: String::new(),
+            http_file: String::new(),
+            hurl: String::new(),
+            bruno: String::new(),
             active_tab: InputTab::Curl,
         }
     }
@@ -72,8 +199,10 @@ pub struct FirstCallApp {
     pub working_draft: Option<RequestDraft>,
     pub last_execution: Option<ExecutionResult>,
     pub attempts: Vec<AttemptListItem>,
+    pub selected_attempt_id: Option<i64>,
     pub recipes: Vec<RecipeListItem>,
     pub recipe_search: String,
+    pub auth_slot_inputs: BTreeMap<String, String>,
     pub settings: AppSettings,
     pub paths: AppPaths,
     pub repository: AppRepository,
@@ -107,8 +236,10 @@ impl FirstCallApp {
             working_draft: None,
             last_execution: None,
             attempts,
+            selected_attempt_id: None,
             recipes,
             recipe_search: String::new(),
+            auth_slot_inputs: BTreeMap::new(),
             settings,
             paths,
             repository,
@@ -122,19 +253,7 @@ impl FirstCallApp {
     }
 
     pub fn analyze_inputs(&mut self) {
-        self.parsed_sources.clear();
-        if !self.inputs.curl.trim().is_empty() {
-            self.parsed_sources
-                .push(parse_curl_input(&self.inputs.curl));
-        }
-        if !self.inputs.docs.trim().is_empty() {
-            self.parsed_sources
-                .push(parse_docs_input(&self.inputs.docs));
-        }
-        if !self.inputs.openapi.trim().is_empty() {
-            self.parsed_sources
-                .push(parse_openapi_input(&self.inputs.openapi));
-        }
+        self.parsed_sources = parse_input_buffers(&self.inputs);
         self.candidate_drafts = merge_parsed_sources(&self.parsed_sources);
         self.selected_candidate = if self.candidate_drafts.is_empty() {
             None
@@ -145,8 +264,9 @@ impl FirstCallApp {
             .selected_candidate
             .and_then(|index| self.candidate_drafts.get(index).cloned());
         if let Some(draft) = &mut self.working_draft {
-            hydrate_auth_slots(draft, self.secret_store.as_ref());
+            clear_visible_auth_slots(draft);
         }
+        self.auth_slot_inputs.clear();
         if self.candidate_drafts.is_empty() {
             self.status_message = Some("No operation candidates were found".to_string());
         } else {
@@ -162,8 +282,9 @@ impl FirstCallApp {
             self.selected_candidate = Some(index);
             self.working_draft = Some(candidate);
             if let Some(draft) = &mut self.working_draft {
-                hydrate_auth_slots(draft, self.secret_store.as_ref());
+                clear_visible_auth_slots(draft);
             }
+            self.auth_slot_inputs.clear();
         }
     }
 
@@ -177,6 +298,7 @@ impl FirstCallApp {
         self.selected_candidate = None;
         self.working_draft = None;
         self.last_execution = None;
+        self.auth_slot_inputs.clear();
     }
 
     pub fn load_sample_for_active_tab(&mut self) {
@@ -184,6 +306,16 @@ impl FirstCallApp {
             InputTab::Curl => self.inputs.curl = SAMPLE_CURL.to_string(),
             InputTab::Docs => self.inputs.docs = SAMPLE_DOCS.to_string(),
             InputTab::OpenApi => self.inputs.openapi = SAMPLE_OPENAPI.to_string(),
+            InputTab::PostmanCollection
+            | InputTab::Har
+            | InputTab::HttpFile
+            | InputTab::Hurl
+            | InputTab::Bruno => {
+                self.status_message = Some(
+                    "Sample fixtures are currently available for curl, docs, and OpenAPI only."
+                        .to_string(),
+                );
+            }
         }
     }
 
@@ -191,11 +323,12 @@ impl FirstCallApp {
         if self.running_execution.is_some() {
             return;
         }
-        let Some(draft) = self.working_draft.clone() else {
+        self.store_pending_auth_inputs();
+        let Some(mut draft) = self.working_draft.clone() else {
             self.status_message = Some("Select or build a request first".to_string());
             return;
         };
-        sync_auth_slots(&draft, self.secret_store.as_mut());
+        hydrate_auth_slots(&mut draft, self.secret_store.as_ref());
         self.secret_status = self.secret_store.status();
 
         let settings = self.settings.clone();
@@ -250,26 +383,23 @@ impl FirstCallApp {
 
     pub fn reopen_attempt(&mut self, id: i64) {
         if let Ok(Some(attempt)) = self.repository.get_attempt(id) {
-            self.inputs.curl = attempt
-                .source_inputs
-                .iter()
-                .find(|item| item.kind == crate::model::SourceKind::Curl)
-                .map(|item| item.raw_text.clone())
-                .unwrap_or_default();
-            self.inputs.docs = attempt
-                .source_inputs
-                .iter()
-                .find(|item| item.kind == crate::model::SourceKind::Docs)
-                .map(|item| item.raw_text.clone())
-                .unwrap_or_default();
-            self.inputs.openapi = attempt
-                .source_inputs
-                .iter()
-                .find(|item| item.kind == crate::model::SourceKind::OpenApi)
-                .map(|item| item.raw_text.clone())
-                .unwrap_or_default();
+            self.inputs = InputBuffers::default();
+            let mut first_tab = None;
+            for source in &attempt.source_inputs {
+                if let Some(tab) = input_tab_for_source_kind(&source.kind) {
+                    *self.inputs.buffer_mut(tab) = source.raw_text.clone();
+                    first_tab.get_or_insert(tab);
+                }
+            }
+            if let Some(tab) = first_tab {
+                self.inputs.active_tab = tab;
+            }
             self.working_draft = Some(attempt.request_draft_snapshot);
+            if let Some(draft) = &mut self.working_draft {
+                clear_visible_auth_slots(draft);
+            }
             self.last_execution = None;
+            self.auth_slot_inputs.clear();
             self.screen = TopScreen::NewAttempt;
         }
     }
@@ -278,8 +408,9 @@ impl FirstCallApp {
         if let Ok(Some(recipe)) = self.repository.get_recipe(id) {
             self.working_draft = Some(recipe_to_draft(recipe));
             if let Some(draft) = &mut self.working_draft {
-                hydrate_auth_slots(draft, self.secret_store.as_ref());
+                clear_visible_auth_slots(draft);
             }
+            self.auth_slot_inputs.clear();
             self.screen = TopScreen::NewAttempt;
         }
     }
@@ -387,7 +518,7 @@ impl FirstCallApp {
         let attempt = RequestAttempt {
             id: None,
             created_at: Utc::now(),
-            source_inputs: current_source_inputs(&self.inputs)
+            source_inputs: safe_source_inputs(&self.parsed_sources, &self.inputs)
                 .into_iter()
                 .map(|mut input| {
                     input.raw_text = redact_free_text(&input.raw_text);
@@ -416,6 +547,44 @@ impl FirstCallApp {
 impl FirstCallApp {
     pub(crate) fn is_running(&self) -> bool {
         self.running_execution.is_some()
+    }
+
+    pub(crate) fn missing_required_slot_count(&self, draft: &RequestDraft) -> usize {
+        draft
+            .slots
+            .iter()
+            .filter(|slot| {
+                slot.required
+                    && !slot_has_runtime_value(
+                        slot,
+                        self.secret_store.as_ref(),
+                        &self.auth_slot_inputs,
+                    )
+            })
+            .count()
+    }
+
+    pub(crate) fn auth_slot_is_stored(&self, slot_name: &str) -> bool {
+        self.secret_store.get(slot_name).is_some()
+    }
+
+    pub(crate) fn store_auth_slot_value(&mut self, slot_name: &str, value: String) {
+        if !value.trim().is_empty() {
+            self.secret_store
+                .set(slot_name, SecretString::new(value.into()));
+            self.secret_status = self.secret_store.status();
+            self.status_message = Some(format!("Stored secret for runtime slot `{slot_name}`"));
+        }
+    }
+
+    fn store_pending_auth_inputs(&mut self) {
+        let pending = std::mem::take(&mut self.auth_slot_inputs);
+        for (slot_name, value) in pending {
+            if !value.trim().is_empty() {
+                self.secret_store
+                    .set(&slot_name, SecretString::new(value.into()));
+            }
+        }
     }
 }
 
@@ -486,27 +655,74 @@ fn bootstrap_repository() -> (AppPaths, AppRepository, Option<String>) {
     }
 }
 
-fn current_source_inputs(inputs: &InputBuffers) -> Vec<crate::model::SourceInput> {
-    let mut sources = Vec::new();
+fn parse_input_buffers(inputs: &InputBuffers) -> Vec<ParsedSource> {
+    let mut parsed = Vec::new();
     if !inputs.curl.trim().is_empty() {
-        sources.push(crate::model::SourceInput {
-            kind: crate::model::SourceKind::Curl,
-            raw_text: inputs.curl.clone(),
-        });
+        parsed.push(parse_curl_input(&inputs.curl));
     }
     if !inputs.docs.trim().is_empty() {
-        sources.push(crate::model::SourceInput {
-            kind: crate::model::SourceKind::Docs,
-            raw_text: inputs.docs.clone(),
-        });
+        parsed.push(parse_docs_input(&inputs.docs));
     }
     if !inputs.openapi.trim().is_empty() {
-        sources.push(crate::model::SourceInput {
-            kind: crate::model::SourceKind::OpenApi,
-            raw_text: inputs.openapi.clone(),
-        });
+        parsed.push(parse_openapi_input(&inputs.openapi));
+    }
+    if !inputs.postman.trim().is_empty() {
+        parsed.push(parse_postman_collection_input(&inputs.postman));
+    }
+    if !inputs.har.trim().is_empty() {
+        parsed.push(parse_har_input(&inputs.har));
+    }
+    if !inputs.http_file.trim().is_empty() {
+        parsed.push(parse_http_file_input(&inputs.http_file));
+    }
+    if !inputs.hurl.trim().is_empty() {
+        parsed.push(parse_hurl_input(&inputs.hurl));
+    }
+    if !inputs.bruno.trim().is_empty() {
+        parsed.push(parse_bruno_input(&inputs.bruno));
+    }
+    parsed
+}
+
+fn safe_source_inputs(
+    parsed_sources: &[ParsedSource],
+    inputs: &InputBuffers,
+) -> Vec<crate::model::SourceInput> {
+    if !parsed_sources.is_empty() {
+        return parsed_sources
+            .iter()
+            .map(|parsed| parsed.source.clone())
+            .collect();
+    }
+    current_source_inputs(inputs)
+}
+
+fn current_source_inputs(inputs: &InputBuffers) -> Vec<crate::model::SourceInput> {
+    let mut sources = Vec::new();
+    for tab in InputTab::ALL {
+        let raw_text = inputs.buffer(tab);
+        if !raw_text.trim().is_empty() {
+            sources.push(crate::model::SourceInput {
+                kind: tab.source_kind(),
+                raw_text: raw_text.to_string(),
+            });
+        }
     }
     sources
+}
+
+fn input_tab_for_source_kind(kind: &SourceKind) -> Option<InputTab> {
+    match kind {
+        SourceKind::Curl => Some(InputTab::Curl),
+        SourceKind::Docs => Some(InputTab::Docs),
+        SourceKind::OpenApi => Some(InputTab::OpenApi),
+        SourceKind::PostmanCollection => Some(InputTab::PostmanCollection),
+        SourceKind::Har => Some(InputTab::Har),
+        SourceKind::HttpFile => Some(InputTab::HttpFile),
+        SourceKind::Hurl => Some(InputTab::Hurl),
+        SourceKind::Bruno => Some(InputTab::Bruno),
+        SourceKind::Graphql => None,
+    }
 }
 
 fn build_recipe_url(draft: &RequestDraft) -> String {
@@ -590,24 +806,42 @@ fn sanitize_filename(input: &str) -> String {
         .collect::<String>()
 }
 
-fn sync_auth_slots(draft: &RequestDraft, secret_store: &mut dyn SecretStore) {
-    for slot in &draft.slots {
-        if slot.location == crate::model::SlotLocation::Auth
-            && let Some(value) = &slot.current_value
-            && !value.trim().is_empty()
-        {
-            secret_store.set(&slot.name, SecretString::new(value.clone().into()));
-        }
-    }
-}
-
 fn hydrate_auth_slots(draft: &mut RequestDraft, secret_store: &dyn SecretStore) {
     for slot in &mut draft.slots {
-        if slot.location == crate::model::SlotLocation::Auth
+        if slot.location == SlotLocation::Auth
             && slot.current_value.as_deref().unwrap_or("").is_empty()
             && let Some(secret) = secret_store.get(&slot.name)
         {
             slot.current_value = Some(secret.expose_secret().to_string());
         }
+    }
+}
+
+fn clear_visible_auth_slots(draft: &mut RequestDraft) {
+    for slot in &mut draft.slots {
+        if slot.location == SlotLocation::Auth {
+            slot.current_value = None;
+        }
+    }
+}
+
+fn slot_has_runtime_value(
+    slot: &RuntimeSlot,
+    secret_store: &dyn SecretStore,
+    auth_slot_inputs: &BTreeMap<String, String>,
+) -> bool {
+    if slot.location == SlotLocation::Auth {
+        auth_slot_inputs
+            .get(&slot.name)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+            || secret_store.get(&slot.name).is_some()
+    } else {
+        !slot
+            .current_value
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
     }
 }

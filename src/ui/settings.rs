@@ -36,10 +36,15 @@ impl FirstCallApp {
             ui.label(format!("Database: {}", self.paths.db_path.display()));
             ui.label(format!("Data dir: {}", self.paths.data_dir.display()));
             ui.label(format!("Exports dir: {}", self.paths.exports_dir.display()));
+            ui.separator();
+            ui.heading("Secret Storage");
             ui.label(format!("Secret storage: {}", self.secret_status.backend));
             if let Some(warning) = &self.secret_status.warning {
                 ui.colored_label(egui::Color32::YELLOW, warning);
             }
+            ui.small("session-memory keeps entered GUI secrets only for the current desktop session.");
+            ui.small("native-keyring is optional and feature-gated by the native-keyring Cargo feature; it may fall back to session-memory when unavailable.");
+            ui.small("firstcall-cli verification remains environment-first and does not read GUI keyring or session-memory secrets.");
             if let Some(warning) = &self.bootstrap_warning {
                 ui.colored_label(egui::Color32::YELLOW, warning);
             }

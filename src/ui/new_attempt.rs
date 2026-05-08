@@ -1,36 +1,38 @@
+use std::collections::BTreeSet;
+
 use eframe::egui;
-use secrecy::SecretString;
 
 use crate::app::{FirstCallApp, InputTab};
-use crate::model::{BodyTemplate, HeaderField, KeyValueField, Outcome};
+use crate::exec::redact::{redact_request, redact_response};
+use crate::model::{BodyTemplate, HeaderField, KeyValueField, Outcome, SlotLocation, SourceKind};
 
 impl FirstCallApp {
     pub(crate) fn render_new_attempt(&mut self, root_ui: &mut egui::Ui) {
         egui::Panel::left("new_attempt_inputs")
             .resizable(true)
-            .default_size(330.0)
+            .default_size(360.0)
             .show_inside(root_ui, |ui| {
-                ui.heading("Inputs");
-                ui.horizontal(|ui| {
-                    for (tab, label) in [
-                        (InputTab::Curl, "Paste curl"),
-                        (InputTab::Docs, "Paste docs"),
-                        (InputTab::OpenApi, "Paste OpenAPI"),
-                    ] {
-                        if ui
-                            .selectable_label(self.inputs.active_tab == tab, label)
-                            .clicked()
-                        {
-                            self.inputs.active_tab = tab;
+                ui.heading("Request Sources");
+                egui::ComboBox::from_label("Source kind")
+                    .selected_text(self.inputs.active_tab.label())
+                    .show_ui(ui, |ui| {
+                        for tab in InputTab::ALL {
+                            ui.selectable_value(&mut self.inputs.active_tab, tab, tab.label());
                         }
-                    }
-                });
+                    });
+                ui.small(self.inputs.active_tab.description());
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Load Sample").clicked() {
+                    if ui
+                        .add_enabled(
+                            self.inputs.active_tab.has_sample(),
+                            egui::Button::new("Load Sample"),
+                        )
+                        .clicked()
+                    {
                         self.load_sample_for_active_tab();
                     }
-                    if ui.button("Analyze Inputs").clicked() {
+                    if ui.button("Analyze Sources").clicked() {
                         self.analyze_inputs();
                     }
                     if ui.button("Reset").clicked() {
@@ -38,86 +40,160 @@ impl FirstCallApp {
                     }
                 });
                 ui.separator();
-                let buffer = match self.inputs.active_tab {
-                    InputTab::Curl => &mut self.inputs.curl,
-                    InputTab::Docs => &mut self.inputs.docs,
-                    InputTab::OpenApi => &mut self.inputs.openapi,
-                };
+                let active_tab = self.inputs.active_tab;
+                let hint = active_tab.hint();
+                let buffer = self.inputs.buffer_mut(active_tab);
                 ui.add(
                     egui::TextEdit::multiline(buffer)
-                        .desired_rows(28)
-                        .hint_text("Paste curl, docs, or OpenAPI here"),
+                        .desired_rows(24)
+                        .hint_text(hint),
                 );
                 ui.separator();
-                ui.label("Extraction notes");
+                ui.label("Parse notes");
                 egui::ScrollArea::vertical()
-                    .max_height(160.0)
+                    .max_height(190.0)
                     .show(ui, |ui| {
+                        if self.parsed_sources.is_empty() {
+                            ui.small("Analyze one or more source buffers to see parser notes.");
+                        }
                         for parsed in &self.parsed_sources {
-                            ui.strong(match parsed.source.kind {
-                                crate::model::SourceKind::Curl => "curl",
-                                crate::model::SourceKind::Docs => "docs",
-                                crate::model::SourceKind::OpenApi => "openapi",
-                                crate::model::SourceKind::PostmanCollection => "postman",
-                                crate::model::SourceKind::Har => "har",
-                                crate::model::SourceKind::HttpFile => "http",
-                                crate::model::SourceKind::Hurl => "hurl",
-                                crate::model::SourceKind::Bruno => "bruno",
-                                crate::model::SourceKind::Graphql => "graphql",
+                            ui.horizontal(|ui| {
+                                ui.strong(source_kind_label(&parsed.source.kind));
+                                ui.label(format!("{} candidate(s)", parsed.candidates.len()));
                             });
-                            for note in &parsed.notes {
-                                ui.label(format!("- {note}"));
+                            if parsed.notes.is_empty() {
+                                ui.small("No parser notes.");
+                            } else {
+                                for note in &parsed.notes {
+                                    ui.label(format!("- {note}"));
+                                }
                             }
+                            ui.separator();
                         }
                     });
             });
 
         egui::Panel::right("new_attempt_runtime")
             .resizable(true)
-            .default_size(360.0)
+            .default_size(380.0)
             .show_inside(root_ui, |ui| {
                 ui.heading("Run");
-                if let Some(draft) = &mut self.working_draft {
+                if let Some(draft) = self.working_draft.as_ref() {
+                    let missing_required = self.missing_required_slot_count(draft);
                     ui.label(format!("Auth: {}", draft.auth.label()));
-                    ui.label(format!(
-                        "Unresolved required slots: {}",
-                        draft.unresolved_slots().len()
-                    ));
+                    let missing_text = format!("Missing required slots: {missing_required}");
+                    if missing_required > 0 {
+                        ui.colored_label(egui::Color32::YELLOW, missing_text);
+                    } else {
+                        ui.label(missing_text);
+                    }
+                }
+
+                if let Some(draft) = self.working_draft.as_ref() {
+                    let slots = draft.slots.clone();
+                    let stored_auth_slots: BTreeSet<String> = slots
+                        .iter()
+                        .filter(|slot| slot.location == SlotLocation::Auth)
+                        .filter(|slot| self.auth_slot_is_stored(&slot.name))
+                        .map(|slot| slot.name.clone())
+                        .collect();
+                    let mut slot_updates = Vec::<(usize, Option<String>)>::new();
+                    let mut auth_saves = Vec::<(String, String)>::new();
+
                     ui.separator();
                     egui::ScrollArea::vertical()
-                        .max_height(260.0)
+                        .max_height(290.0)
                         .show(ui, |ui| {
-                            for slot in &mut draft.slots {
-                                ui.horizontal(|ui| {
-                                    ui.label(format!(
-                                        "{} ({}, {})",
-                                        slot.name,
-                                        slot.location.label(),
-                                        if slot.required {
+                            for location in [
+                                SlotLocation::Auth,
+                                SlotLocation::Path,
+                                SlotLocation::Query,
+                                SlotLocation::Header,
+                                SlotLocation::Body,
+                            ] {
+                                let indexes = slots
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, slot)| slot.location == location)
+                                    .map(|(index, _)| index)
+                                    .collect::<Vec<_>>();
+                                if indexes.is_empty() {
+                                    continue;
+                                }
+
+                                ui.strong(format!("{} slots", location.label()));
+                                for index in indexes {
+                                    let slot = &slots[index];
+                                    ui.horizontal(|ui| {
+                                        ui.label(&slot.name);
+                                        ui.small(if slot.required {
                                             "required"
                                         } else {
                                             "optional"
+                                        });
+                                    });
+
+                                    if location == SlotLocation::Auth {
+                                        let stored = stored_auth_slots.contains(&slot.name);
+                                        if stored {
+                                            ui.small(format!(
+                                                "Stored in {}. Value is not displayed.",
+                                                self.secret_status.backend
+                                            ));
                                         }
-                                    ));
-                                });
-                                let response = ui.text_edit_singleline(
-                                    slot.current_value.get_or_insert_with(String::new),
-                                );
-                                if response.changed()
-                                    && slot.location == crate::model::SlotLocation::Auth
-                                    && let Some(value) = &slot.current_value
-                                    && !value.trim().is_empty()
-                                {
-                                    self.secret_store
-                                        .set(&slot.name, SecretString::new(value.clone().into()));
-                                    self.secret_status = self.secret_store.status();
+                                        let entry = self
+                                            .auth_slot_inputs
+                                            .entry(slot.name.clone())
+                                            .or_default();
+                                        ui.horizontal(|ui| {
+                                            ui.add(
+                                                egui::TextEdit::singleline(entry)
+                                                    .password(true)
+                                                    .hint_text("enter secret value"),
+                                            );
+                                            if ui
+                                                .add_enabled(
+                                                    !entry.trim().is_empty(),
+                                                    egui::Button::new("Save secret"),
+                                                )
+                                                .clicked()
+                                            {
+                                                auth_saves.push((slot.name.clone(), entry.clone()));
+                                            }
+                                        });
+                                    } else {
+                                        let mut value =
+                                            slot.current_value.clone().unwrap_or_default();
+                                        if ui.text_edit_singleline(&mut value).changed() {
+                                            let next_value = if value.trim().is_empty() {
+                                                None
+                                            } else {
+                                                Some(value)
+                                            };
+                                            slot_updates.push((index, next_value));
+                                        }
+                                    }
+
+                                    if !slot.description.is_empty() {
+                                        ui.small(&slot.description);
+                                    }
+                                    ui.separator();
                                 }
-                                if !slot.description.is_empty() {
-                                    ui.small(&slot.description);
-                                }
-                                ui.separator();
                             }
                         });
+
+                    if let Some(draft) = &mut self.working_draft {
+                        for (index, value) in slot_updates {
+                            if let Some(slot) = draft.slots.get_mut(index) {
+                                slot.current_value = value;
+                            }
+                        }
+                    }
+                    for (slot_name, value) in auth_saves {
+                        self.store_auth_slot_value(&slot_name, value);
+                        self.auth_slot_inputs.remove(&slot_name);
+                    }
+
                     let can_run = !self.is_running();
                     if ui
                         .add_enabled(can_run, egui::Button::new("Run Request"))
@@ -133,68 +209,38 @@ impl FirstCallApp {
                 }
 
                 ui.separator();
-                ui.heading("Result");
-                if let Some(result) = &self.last_execution {
-                    ui.label(format!("Outcome: {}", result.outcome.label()));
-                    if let Some(blocker) = &result.blocker {
-                        ui.label(format!("Blocker: {}", blocker.label()));
-                    }
-                    if let Some(response) = &result.response_snapshot {
-                        ui.label(format!(
-                            "Status: {}",
-                            response
-                                .status
-                                .map(|status| status.to_string())
-                                .unwrap_or_else(|| "n/a".to_string())
-                        ));
-                        ui.label(format!("Elapsed: {} ms", response.elapsed_ms));
-                        if !response.validation_errors.is_empty() {
-                            ui.colored_label(egui::Color32::YELLOW, "Validation errors");
-                            for error in &response.validation_errors {
-                                ui.label(format!("- {error}"));
-                            }
-                        }
-                        ui.separator();
-                        ui.label("Headers");
-                        egui::ScrollArea::vertical()
-                            .max_height(90.0)
-                            .show(ui, |ui| {
-                                for header in &response.headers {
-                                    ui.label(format!("{}: {}", header.key, header.value));
-                                }
-                            });
-                        ui.separator();
-                        ui.label("Body preview");
-                        let mut preview = response.body_preview.clone();
-                        ui.add(
-                            egui::TextEdit::multiline(&mut preview)
-                                .desired_rows(16)
-                                .interactive(false),
-                        );
-                    } else if result.outcome == Outcome::Failure {
-                        ui.label(&result.notes);
-                    }
-                } else {
-                    ui.label("No request has been executed yet.");
-                }
+                render_result(ui, self.last_execution.as_ref());
             });
 
         egui::CentralPanel::default().show_inside(root_ui, |ui| {
             ui.heading("Candidates And Builder");
             ui.separator();
+            ui.horizontal(|ui| {
+                ui.label(format!("Candidates: {}", self.candidate_drafts.len()));
+                if let Some(index) = self.selected_candidate {
+                    ui.label(format!("Selected: {}", index + 1));
+                }
+            });
             egui::ScrollArea::vertical()
-                .max_height(140.0)
+                .max_height(145.0)
                 .show(ui, |ui| {
                     for index in 0..self.candidate_drafts.len() {
                         let candidate = &self.candidate_drafts[index];
                         let selected = self.selected_candidate == Some(index);
+                        let source_kinds = candidate
+                            .source_kinds
+                            .iter()
+                            .map(source_kind_label)
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         if ui
                             .selectable_label(
                                 selected,
                                 format!(
-                                    "{} [{}]",
+                                    "{} [{}] {}",
                                     candidate.endpoint_summary(),
-                                    candidate.confidence.overall.label()
+                                    candidate.confidence.overall.label(),
+                                    source_kinds
                                 ),
                             )
                             .clicked()
@@ -206,6 +252,26 @@ impl FirstCallApp {
 
             ui.separator();
             if let Some(draft) = &mut self.working_draft {
+                ui.strong(format!("{} {}", draft.method, draft.endpoint_summary()));
+                ui.small(format!(
+                    "Sources: {}",
+                    draft
+                        .source_kinds
+                        .iter()
+                        .map(source_kind_label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                ui.small(format!(
+                    "Confidence: {} - {}",
+                    draft.confidence.overall.label(),
+                    draft.confidence.notes
+                ));
+                if let Some(reason) = &draft.unsupported_reason {
+                    ui.colored_label(egui::Color32::YELLOW, format!("Unsupported: {reason}"));
+                }
+                ui.separator();
+
                 ui.horizontal(|ui| {
                     ui.label("Name");
                     ui.text_edit_singleline(&mut draft.name);
@@ -240,8 +306,9 @@ impl FirstCallApp {
                 ui.label("Evidence");
                 for item in &draft.evidence {
                     ui.label(format!(
-                        "- {} [{}] {}",
+                        "- {} [{}:{}] {}",
                         item.label,
+                        source_kind_label(&item.source_kind),
                         item.confidence.label(),
                         item.detail
                     ));
@@ -250,6 +317,77 @@ impl FirstCallApp {
                 ui.label("No candidate selected.");
             }
         });
+    }
+}
+
+fn render_result(ui: &mut egui::Ui, result: Option<&crate::model::ExecutionResult>) {
+    ui.heading("Result");
+    let Some(result) = result else {
+        ui.label("No request has been executed yet.");
+        return;
+    };
+
+    let request = redact_request(&result.rendered_request);
+    ui.label(format!("Request: {} {}", request.method, request.url));
+    ui.label(format!("Outcome: {}", result.outcome.label()));
+    if let Some(blocker) = &result.blocker {
+        ui.label(format!("Blocker: {}", blocker.label()));
+    }
+    if !result.notes.is_empty() {
+        ui.small(&result.notes);
+    }
+
+    if let Some(response) = result.response_snapshot.as_ref().map(redact_response) {
+        ui.label(format!(
+            "Status: {}",
+            response
+                .status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "n/a".to_string())
+        ));
+        ui.label(format!("Elapsed: {} ms", response.elapsed_ms));
+        if let Some(error) = &response.transport_error {
+            ui.colored_label(egui::Color32::YELLOW, error);
+        }
+        if !response.validation_errors.is_empty() {
+            ui.colored_label(egui::Color32::YELLOW, "Validation errors");
+            for error in &response.validation_errors {
+                ui.label(format!("- {error}"));
+            }
+        }
+        ui.separator();
+        ui.label("Headers");
+        egui::ScrollArea::vertical()
+            .max_height(90.0)
+            .show(ui, |ui| {
+                for header in &response.headers {
+                    ui.label(format!("{}: {}", header.key, header.value));
+                }
+            });
+        ui.separator();
+        ui.label("Body preview");
+        let mut preview = response.body_preview;
+        ui.add(
+            egui::TextEdit::multiline(&mut preview)
+                .desired_rows(14)
+                .interactive(false),
+        );
+    } else if result.outcome == Outcome::Failure {
+        ui.label(&result.notes);
+    }
+}
+
+fn source_kind_label(kind: &SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Curl => "curl",
+        SourceKind::Docs => "docs",
+        SourceKind::OpenApi => "openapi",
+        SourceKind::PostmanCollection => "postman",
+        SourceKind::Har => "har",
+        SourceKind::HttpFile => "http",
+        SourceKind::Hurl => "hurl",
+        SourceKind::Bruno => "bruno",
+        SourceKind::Graphql => "graphql",
     }
 }
 
