@@ -472,6 +472,9 @@ impl FirstCallApp {
     }
 
     pub fn save_current_recipe(&mut self) {
+        if self.context_change_blocked_while_running() {
+            return;
+        }
         let Some(result) = &self.last_execution else {
             self.status_message =
                 Some("Run the request successfully before saving a recipe.".to_string());
@@ -585,6 +588,9 @@ impl FirstCallApp {
     }
 
     pub(crate) fn store_auth_slot_value(&mut self, slot_name: &str, value: String) {
+        if self.context_change_blocked_while_running() {
+            return;
+        }
         if !value.trim().is_empty() {
             self.secret_store
                 .set(slot_name, SecretString::new(value.into()));
@@ -1094,6 +1100,53 @@ mod tests {
             .expect("saved recipe");
         assert!(recipe.url_template.ends_with("/executed"));
         assert!(!recipe.url_template.ends_with("/edited"));
+    }
+
+    #[test]
+    fn save_current_recipe_while_running_does_not_insert_recipe_or_drop_receiver() {
+        let executed_draft = safe_executed_draft_snapshot(&draft_with_path("/executed"));
+        let result = success_result("/executed");
+        let mut app = app_with_working_draft(draft_with_path("/edited"));
+        app.last_execution = Some(result);
+        app.last_successful_draft = Some(executed_draft);
+        app.running_execution = Some(running_execution_with_path("/running"));
+
+        app.save_current_recipe();
+
+        assert!(app.running_execution.is_some());
+        assert!(app.repository.list_recipes().expect("recipes").is_empty());
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("A request is currently running")
+        );
+    }
+
+    #[test]
+    fn store_auth_slot_value_while_running_does_not_save_secret_or_drop_receiver() {
+        let mut app = app_with_working_draft(draft_with_path("/running"));
+        app.running_execution = Some(running_execution_with_path("/running"));
+
+        app.store_auth_slot_value(
+            "bearer_token",
+            "running_guard_secret_should_not_leak".to_string(),
+        );
+
+        assert!(app.running_execution.is_some());
+        assert!(app.secret_store.get("bearer_token").is_none());
+        assert!(
+            !app.status_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("running_guard_secret_should_not_leak")
+        );
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("A request is currently running")
+        );
     }
 
     #[test]
