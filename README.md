@@ -9,6 +9,8 @@ FirstCall is a native local-first desktop tool for turning request sources such 
 
 FirstCall Agent Recipes adds a second surface to that workflow: **Verified API tool recipes for AI agents.** A recipe becomes an agent-usable package only after a real request has succeeded.
 
+For the current CLI / desktop GUI boundary, see [docs/surfaces.md](docs/surfaces.md).
+
 ## MVP Scope
 
 - Native desktop app built with Rust + `eframe`/`egui`
