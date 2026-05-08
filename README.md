@@ -12,6 +12,18 @@ FirstCall is not a Postman, Hurl, or Bruno runner. Its source adapters are stati
 
 For the current CLI / desktop GUI boundary, see [docs/surfaces.md](docs/surfaces.md). For build-surface notes and optional desktop feature design, see [docs/build-surfaces.md](docs/build-surfaces.md).
 
+## Demos
+
+Desktop GUI workbench, captured from the current `firstcall` app:
+
+<img src="docs/assets/firstcall-gui-workbench.gif" alt="FirstCall desktop GUI workbench demo" width="900">
+
+CLI lifecycle, rendered from actual `firstcall-cli` command output:
+
+<img src="docs/assets/firstcall-cli-demo.gif" alt="FirstCall CLI lifecycle demo" width="900">
+
+The terminal recording source is also checked in as [docs/assets/firstcall-cli.cast](docs/assets/firstcall-cli.cast).
+
 ## Product Surfaces
 
 FirstCall has two product surfaces built on shared local core logic:
