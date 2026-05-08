@@ -66,5 +66,13 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+      - name: Run native keyring feature tests
+        run: |
+          cargo test --locked secrets --features native-keyring
+          cargo test --locked keyring --features native-keyring
+
+      - name: Build native keyring feature
+        run: cargo build --locked --features native-keyring
+
       - name: Build app
         run: cargo build --locked
