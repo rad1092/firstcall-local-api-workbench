@@ -10,8 +10,8 @@ FirstCall is not a Postman, Hurl, or Bruno runner. Source adapters are static in
 
 ## Demos
 
-Desktop GUI workbench, captured from the current `firstcall` app.
-Run it with `cargo run` or explicitly with `cargo run --bin firstcall`:
+Desktop GUI workbench, captured from the `v0.1.0` release binary against a
+local loopback HTTP server:
 
 <img src="docs/assets/firstcall-gui-workbench.gif" alt="FirstCall desktop GUI workbench demo" width="900">
 
