@@ -51,6 +51,16 @@ cargo build --locked --features native-keyring
 cargo build --locked --features "desktop native-keyring"
 ```
 
+Release binary workflow:
+
+```powershell
+cargo build --locked --release --bin firstcall --bin firstcall-cli
+```
+
+GitHub release archives include both binaries for the target OS. CLI-only source
+builds still use `--no-default-features` when desktop dependencies are not
+wanted.
+
 ## Boundary Rules
 
 - `cargo run` launches the desktop GUI because default features include

@@ -36,6 +36,7 @@ Read more:
 - [Product surfaces](docs/surfaces.md)
 - [Build surfaces](docs/build-surfaces.md)
 - [Architecture map](docs/architecture.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## Trust Chain
 
@@ -49,7 +50,25 @@ request source -> ParsedSource -> RequestDraft candidate -> local verification
 
 The CLI lifecycle is documented in [docs/cli-lifecycle.md](docs/cli-lifecycle.md). Release and handoff checks are in [docs/release-readiness.md](docs/release-readiness.md).
 
-## Quick Start
+## Download
+
+For normal use, download a binary archive from
+[GitHub Releases](https://github.com/rad1092/firstcall-local-api-workbench/releases).
+Each release asset includes both:
+
+- `firstcall`: the desktop GUI workbench.
+- `firstcall-cli`: the automation CLI.
+
+Pick the archive for your OS, extract it, and run:
+
+```powershell
+firstcall-cli version
+```
+
+On macOS or Linux, run `./firstcall-cli version` from the extracted directory if
+the directory is not on your `PATH`.
+
+## Build From Source
 
 Build on the current host OS:
 

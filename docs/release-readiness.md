@@ -25,6 +25,12 @@ cargo build --locked --bin firstcall-cli --no-default-features
 cargo run --locked --bin firstcall-cli --no-default-features -- version
 ```
 
+Release binary build check:
+
+```powershell
+cargo build --locked --release --bin firstcall --bin firstcall-cli
+```
+
 Focused CLI lifecycle checks:
 
 ```powershell
@@ -85,6 +91,33 @@ The CLI-first lifecycle expected for a release candidate is:
 The CLI lifecycle GitHub Actions workflow also runs this storage-backed flow
 through actual `verify --recipe-id` against a local loopback server and then
 validates the re-exported package.
+
+## Binary Release Assets
+
+The release binary workflow should produce deterministic assets for each
+published tag:
+
+- `firstcall-<tag>-x86_64-pc-windows-msvc.zip`
+- `firstcall-<tag>-x86_64-unknown-linux-gnu.tar.gz`
+- `firstcall-<tag>-x86_64-apple-darwin.tar.gz`
+- `firstcall-<tag>-aarch64-apple-darwin.tar.gz`
+- `SHA256SUMS.txt`
+
+Each archive should include both `firstcall` and `firstcall-cli`, plus a short
+release README. Backfilled releases should keep the existing tag in place and
+upload deterministic assets with `--clobber`.
+
+After a release workflow run, verify:
+
+```powershell
+gh release view v0.1.0 --repo rad1092/firstcall-local-api-workbench --json assets,url
+```
+
+Download at least one archive and run the packaged CLI:
+
+```powershell
+firstcall-cli version
+```
 
 ## Safety Checks
 
