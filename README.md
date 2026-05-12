@@ -6,7 +6,7 @@
 
 FirstCall is a Rust 2024 local-first verified API recipe workbench. It turns request sources into `RequestDraft` candidates, requires local verification, promotes successful requests into reusable recipes, and exports verified recipes as redacted agent packages.
 
-FirstCall is not a Postman, Hurl, or Bruno runner. Source adapters are static intake paths for building verified recipes; imported scripts, tests, runtime hooks, captured responses, and environment files are not executed.
+Source adapters are static intake paths for building verified recipes from curl, OpenAPI, Postman Collection, HAR, `.http` / `.rest`, Hurl, and Bruno/OpenCollection. Imported scripts, tests, runtime hooks, captured responses, and environment files are not executed.
 
 ## Demos
 
