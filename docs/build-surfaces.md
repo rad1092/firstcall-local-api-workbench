@@ -61,6 +61,36 @@ GitHub release archives include both binaries for the target OS. CLI-only source
 builds still use `--no-default-features` when desktop dependencies are not
 wanted.
 
+## Local Build Cache Size
+
+Cargo writes build outputs and incremental caches under `target/`. This
+directory is local developer cache, not source code and not part of release
+archives.
+
+`target/` can become large during FirstCall development because debug builds keep
+symbols, integration tests produce separate binaries, GUI dependencies add large
+native build artifacts, and Windows plus WSL builds may accumulate side by side.
+This does not reflect normal user install size: release archives contain the
+compiled `firstcall` and `firstcall-cli` binaries, not the local Cargo cache.
+
+To reclaim disk space, remove Cargo build artifacts:
+
+```powershell
+cargo clean
+```
+
+If Windows and WSL builds are both used frequently, set separate target
+directories to avoid mixing host artifacts:
+
+```powershell
+$env:CARGO_TARGET_DIR = "target\windows"
+cargo build --locked
+```
+
+```bash
+CARGO_TARGET_DIR=target/wsl cargo build --locked
+```
+
 ## Boundary Rules
 
 - `cargo run` launches the desktop GUI because default features include
