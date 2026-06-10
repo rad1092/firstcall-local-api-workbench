@@ -203,6 +203,16 @@ pub(crate) fn body_template_value(body: &BodyTemplate) -> Value {
     }
 }
 
+pub(crate) fn body_kind(body: &BodyTemplate) -> &'static str {
+    match body {
+        BodyTemplate::None => "none",
+        BodyTemplate::Json { .. } => "json",
+        BodyTemplate::Text { .. } => "text",
+        BodyTemplate::Form { .. } => "form",
+        BodyTemplate::Multipart { .. } => "multipart",
+    }
+}
+
 pub(crate) fn export_slots(slots: &[RuntimeSlot]) -> Vec<ExportSlot> {
     slots
         .iter()
@@ -256,6 +266,7 @@ pub(crate) fn safe_canonical_recipe(recipe: &Recipe) -> Value {
         "auth_type": auth_type(&recipe.auth_style),
         "headers": non_auth_headers_map(recipe),
         "query": non_auth_query_map(recipe),
+        "body_kind": body_kind(&recipe.body_template),
         "body_template": body_template_value(&recipe.body_template),
         "slots": export_slots(&recipe.slots),
         "last_success_at": recipe.last_success_at.map(|value| value.to_rfc3339()),
@@ -295,7 +306,49 @@ pub(crate) fn all_env_requirements(recipe: &Recipe) -> Vec<EnvRequirement> {
             }
         }
     }
+    for name in env_refs_in_value(&body_template_value(&recipe.body_template)) {
+        if !requirements.iter().any(|existing| existing.name == name) {
+            requirements.push(EnvRequirement {
+                description: format!("Environment value referenced by body template {name}"),
+                name,
+            });
+        }
+    }
     requirements
+}
+
+fn env_refs_in_value(value: &Value) -> Vec<String> {
+    let mut refs = Vec::new();
+    collect_env_refs(value, &mut refs);
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn collect_env_refs(value: &Value, refs: &mut Vec<String>) {
+    match value {
+        Value::String(text) => {
+            let regex =
+                Regex::new(r"\$\{\s*(FIRSTCALL_[A-Z0-9_]+)\s*\}").expect("valid env ref regex");
+            refs.extend(
+                regex
+                    .captures_iter(text)
+                    .filter_map(|captures| captures.get(1).map(|capture| capture.as_str()))
+                    .map(str::to_string),
+            );
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_env_refs(item, refs);
+            }
+        }
+        Value::Object(object) => {
+            for item in object.values() {
+                collect_env_refs(item, refs);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn url_query_env_requirements(url_template: &str) -> Vec<EnvRequirement> {

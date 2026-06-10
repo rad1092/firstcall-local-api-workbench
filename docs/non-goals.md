@@ -12,7 +12,7 @@ FirstCall is a local-first verified API recipe workbench. Its source adapters ar
 - Remote OpenAPI `http://` and `https://` refs are not fetched.
 - There is no cloud backend or marketplace.
 - Generated `mcp-server/` files are package artifacts, not source of truth for package import.
-- Optional MCP compile smoke is opt-in and does not run the generated MCP server.
+- `validate-package --mcp-compile-smoke` is a local compile check only; generated MCP runtime checks are run separately in release/CI verification.
 
 ## Static Adapter Limits
 

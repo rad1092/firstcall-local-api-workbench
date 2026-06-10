@@ -28,7 +28,7 @@ dist/sample-agent-tool/
 
 File purposes:
 
-- `recipe.yaml`: the portable agent recipe description. It contains method, URL template, auth metadata, headers, query parameters, body template, input slots, verification metadata, and security metadata.
+- `recipe.yaml`: the portable agent recipe description. It contains method, URL template, auth metadata, headers, query parameters, body kind, body template, input slots, verification metadata, and security metadata.
 - `verified.lock.json`: verification lock metadata. It records whether the recipe was verified, the last successful status/time, deterministic fingerprints, redaction policy version, and generator.
 - `skill.md`: concise agent-facing usage notes, safety rules, inputs, environment variables, and last verification information.
 - `policy.json`: static policy constraints for future agent governance, including allowed methods, hosts, paths, secret headers/query keys, confirmation requirements, and response redaction keys.
@@ -53,6 +53,7 @@ Required top-level fields:
 - `auth`: auth metadata.
 - `headers`: non-auth static or templated headers.
 - `query`: non-auth static or templated query parameters.
+- `body_kind`: request body kind. Current values are `none`, `json`, `text`, `form`, and `multipart`.
 - `body_template`: request body template.
 - `slots`: runtime input slot definitions.
 - `verified`: last successful verification metadata.
@@ -75,6 +76,7 @@ headers:
   Accept: application/json
 query:
   include: "${include}"
+body_kind: json
 body_template:
   email: "${email}"
 slots:
@@ -164,7 +166,7 @@ Required fields:
 - `verified`: must be `true` for an exportable verified package.
 - `last_success_at`: RFC3339 timestamp for the last successful local verification.
 - `last_success_status`: HTTP status for the last successful verification. Must be `200..=299`.
-- `request_fingerprint`: 64-character lowercase SHA-256-shaped hex string for the safe canonical request.
+- `request_fingerprint`: SHA-256 over the safe canonical request. Validation and import-readiness recompute it from `recipe.yaml` and require a match.
 - `response_schema_fingerprint`: 64-character lowercase SHA-256-shaped hex string for response schema metadata.
 - `redaction_policy_version`: redaction policy version used when generating the package.
 - `generator`: generator identifier. Current value is `firstcall`.
@@ -315,7 +317,7 @@ Current generated MCP server behavior:
 
 Tool annotations are advisory hints only. They are not security controls. The real guardrails remain `policy.json`, local verify guards, `validate-package`, no raw secret export, and environment-variable-only secret handling.
 
-Rust tests and default `validate-package` do not execute:
+Default `validate-package` does not execute:
 
 - `npm install`
 - `npm build`
@@ -323,6 +325,11 @@ Rust tests and default `validate-package` do not execute:
 - Node
 - MCP Inspector
 - the generated MCP runtime
+
+The CI lifecycle and release-readiness flow run a separate generated MCP
+round-trip: install generated dependencies, build the generated TypeScript
+server, list MCP tools, and call the generated tool against a loopback or
+read-only live endpoint.
 
 The generated MCP server files are artifacts. They are not treated as the source of truth for package import.
 
@@ -335,10 +342,10 @@ It checks:
 - Required package layout.
 - Required files and directories.
 - YAML and JSON parseability.
-- `recipe.yaml` required fields.
+- `recipe.yaml` required fields, including supported `body_kind`.
 - `recipe.yaml` security metadata.
 - 2xx verified semantics in `recipe.yaml`.
-- `verified.lock.json` verified metadata.
+- `verified.lock.json` verified metadata and request fingerprint match against `recipe.yaml`.
 - Secret leak markers and high-confidence bearer/API-key/password-like values.
 - `policy.json` shape and confirmation requirements.
 - MCP template markers, including structured output and annotations.
@@ -447,7 +454,7 @@ The supported local-first agent recipe lifecycle is:
 8. `package --recipe-id ID --out DIR` exports the stored recipe only after successful local re-verification.
 9. The re-exported package can be validated and inspected with the same package commands.
 
-Generated `mcp-server/` files remain artifacts throughout this lifecycle. They are not import source of truth, and Rust tests do not run generated MCP runtime, npm, Node, TypeScript, MCP Inspector, or external live HTTP.
+Generated `mcp-server/` files remain artifacts throughout this lifecycle. They are not import source of truth, and package import never runs generated MCP runtime, npm, Node, TypeScript, MCP Inspector, or external live HTTP.
 
 ## Machine-Readable CLI Reports
 

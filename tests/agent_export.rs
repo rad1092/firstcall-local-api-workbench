@@ -53,6 +53,7 @@ fn yaml_export_contains_agent_fields_without_raw_secrets() {
     assert!(yaml.contains("schema_version: 1"));
     assert!(yaml.contains("generator: firstcall"));
     assert!(yaml.contains("method: POST"));
+    assert!(yaml.contains("body_kind: json"));
     assert!(yaml.contains("url_template: https://api.stripe.com/v1/customers"));
     assert!(yaml.contains("FIRSTCALL_BEARER_TOKEN"));
     assert!(!yaml.contains(RAW_SECRET));
@@ -248,6 +249,27 @@ fn generated_mcp_server_contains_structured_output_markers() {
     assert!(server.contains("outputSchema"));
     assert!(server.contains("body_preview"));
     assert!(server.contains("redactResponsePreview"));
+    assert!(server.contains("redactSensitiveText"));
+}
+
+#[test]
+fn generated_mcp_server_sends_multipart_as_form_data() {
+    let mut recipe = fake_recipe("POST", "https://api.example.com/upload/{{user_id}}");
+    recipe.body_template = BodyTemplate::Multipart {
+        fields: vec![KeyValueField {
+            key: "email".to_string(),
+            value: "{{email}}".to_string(),
+            required: true,
+            description: "Email field".to_string(),
+            confidence: Confidence::High,
+        }],
+    };
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+
+    assert!(server.contains("new FormData()"));
+    assert!(server.contains("form.append"));
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use url::Url;
 
 use crate::exec::client::{build_http_client, execute_request};
@@ -148,7 +149,7 @@ where
     validate_auth_for_preflight(recipe, &env, &mut report);
     validate_headers_for_preflight(recipe, &env, &mut report);
     validate_query_template_for_preflight(recipe, &env, &mut report);
-    validate_body_for_preflight(recipe, &mut report);
+    validate_body_for_preflight(recipe, &env, &mut report);
     validate_slots_for_preflight(recipe, &env, &mut report);
 
     report
@@ -177,7 +178,7 @@ where
     let (base_url, path, mut query) = split_url_template_for_verify(&recipe.url_template, &env)?;
     query.extend(hydrate_query_template(recipe, &env)?);
     let headers = hydrate_headers(recipe, &env)?;
-    let body = hydrate_body(&recipe.body_template)?;
+    let body = hydrate_body(&recipe.body_template, &env)?;
     let slots = hydrate_slots(recipe, &env)?;
 
     let draft = RequestDraft {
@@ -417,11 +418,17 @@ fn validate_query_template_for_preflight<F>(
     }
 }
 
-fn validate_body_for_preflight(recipe: &Recipe, report: &mut VerifyPreflightReport) {
+fn validate_body_for_preflight<F>(recipe: &Recipe, env: &F, report: &mut VerifyPreflightReport)
+where
+    F: Fn(&str) -> Option<String>,
+{
     if body_contains_redacted(&recipe.body_template) {
         report
             .blockers
             .push("body template contains redacted values and cannot be verified".to_string());
+    }
+    for name in body_env_refs(&recipe.body_template) {
+        add_required_env(report, name.clone(), env_status(env, &name));
     }
 }
 
@@ -633,11 +640,66 @@ where
     Ok(value.to_string())
 }
 
-fn hydrate_body(body: &BodyTemplate) -> Result<BodyTemplate> {
+fn hydrate_body<F>(body: &BodyTemplate, env: &F) -> Result<BodyTemplate>
+where
+    F: Fn(&str) -> Option<String>,
+{
     if body_contains_redacted(body) {
         bail!("Body template contains redacted values and cannot be verified");
     }
-    Ok(body.clone())
+    Ok(match body {
+        BodyTemplate::None => BodyTemplate::None,
+        BodyTemplate::Json { template } => BodyTemplate::Json {
+            template: hydrate_env_refs(template, env)?,
+        },
+        BodyTemplate::Text { text } => BodyTemplate::Text {
+            text: hydrate_env_refs(text, env)?,
+        },
+        BodyTemplate::Form { fields } => BodyTemplate::Form {
+            fields: hydrate_env_refs_in_fields(fields, env)?,
+        },
+        BodyTemplate::Multipart { fields } => BodyTemplate::Multipart {
+            fields: hydrate_env_refs_in_fields(fields, env)?,
+        },
+    })
+}
+
+fn hydrate_env_refs_in_fields<F>(fields: &[KeyValueField], env: &F) -> Result<Vec<KeyValueField>>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    fields
+        .iter()
+        .map(|field| {
+            let mut field = field.clone();
+            field.value = hydrate_env_refs(&field.value, env)?;
+            Ok(field)
+        })
+        .collect()
+}
+
+fn hydrate_env_refs<F>(text: &str, env: &F) -> Result<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let regex = Regex::new(r"\$\{\s*(FIRSTCALL_[A-Z0-9_]+)\s*\}").expect("valid env ref regex");
+    let mut missing = Vec::new();
+    let rendered = regex
+        .replace_all(text, |captures: &regex::Captures<'_>| {
+            let name = captures.get(1).map_or("", |capture| capture.as_str());
+            match env(name).filter(|value| !value.trim().is_empty()) {
+                Some(value) => value,
+                None => {
+                    missing.push(name.to_string());
+                    captures[0].to_string()
+                }
+            }
+        })
+        .to_string();
+    if let Some(name) = missing.first() {
+        bail!("Missing required environment variable: {name}");
+    }
+    Ok(rendered)
 }
 
 fn hydrate_slots<F>(recipe: &Recipe, env: &F) -> Result<Vec<RuntimeSlot>>
@@ -828,6 +890,33 @@ fn body_contains_redacted(body: &BodyTemplate) -> bool {
             fields.iter().any(|field| is_redacted(&field.value))
         }
     }
+}
+
+fn body_env_refs(body: &BodyTemplate) -> Vec<String> {
+    let mut refs = Vec::new();
+    match body {
+        BodyTemplate::None => {}
+        BodyTemplate::Json { template } => collect_env_refs(template, &mut refs),
+        BodyTemplate::Text { text } => collect_env_refs(text, &mut refs),
+        BodyTemplate::Form { fields } | BodyTemplate::Multipart { fields } => {
+            for field in fields {
+                collect_env_refs(&field.value, &mut refs);
+            }
+        }
+    }
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn collect_env_refs(text: &str, refs: &mut Vec<String>) {
+    let regex = Regex::new(r"\$\{\s*(FIRSTCALL_[A-Z0-9_]+)\s*\}").expect("valid env ref regex");
+    refs.extend(
+        regex
+            .captures_iter(text)
+            .filter_map(|captures| captures.get(1).map(|capture| capture.as_str()))
+            .map(str::to_string),
+    );
 }
 
 fn redact_header_field(field: &HeaderField) -> HeaderField {

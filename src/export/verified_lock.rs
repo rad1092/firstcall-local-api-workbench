@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::Serialize;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::model::Recipe;
@@ -20,7 +21,6 @@ struct VerifiedLock {
 }
 
 pub fn recipe_to_verified_lock_json(recipe: &Recipe) -> Result<String> {
-    let canonical = serde_json::to_string(&safe_canonical_recipe(recipe))?;
     let artifact = VerifiedLock {
         schema_version: 1,
         recipe_name: recipe.name.clone(),
@@ -30,12 +30,41 @@ pub fn recipe_to_verified_lock_json(recipe: &Recipe) -> Result<String> {
             .map(|value| value.to_rfc3339())
             .unwrap_or_else(|| "unverified".to_string()),
         last_success_status: recipe.last_success_status.unwrap_or_default(),
-        request_fingerprint: sha256_hex(&canonical),
+        request_fingerprint: request_fingerprint_for_recipe(recipe)?,
         response_schema_fingerprint: sha256_hex("no_response_schema"),
         redaction_policy_version: 1,
         generator: GENERATOR.to_string(),
     };
     serde_json::to_string_pretty(&artifact).map_err(anyhow::Error::from)
+}
+
+pub fn request_fingerprint_for_recipe(recipe: &Recipe) -> Result<String> {
+    let canonical = serde_json::to_string(&safe_canonical_recipe(recipe))?;
+    Ok(sha256_hex(&canonical))
+}
+
+pub fn request_fingerprint_for_agent_recipe_yaml(value: &Value) -> Result<String> {
+    let verified = value.get("verified").unwrap_or(&Value::Null);
+    let auth = value.get("auth").unwrap_or(&Value::Null);
+    let canonical = json!({
+        "name": value.get("name").and_then(Value::as_str).unwrap_or_default(),
+        "method": value
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_uppercase(),
+        "url_template": value.get("url_template").and_then(Value::as_str).unwrap_or_default(),
+        "auth_type": auth.get("type").and_then(Value::as_str).unwrap_or("none"),
+        "headers": value.get("headers").cloned().unwrap_or_else(|| json!({})),
+        "query": value.get("query").cloned().unwrap_or_else(|| json!({})),
+        "body_kind": value.get("body_kind").and_then(Value::as_str).unwrap_or("json"),
+        "body_template": value.get("body_template").cloned().unwrap_or_else(|| json!({})),
+        "slots": value.get("slots").cloned().unwrap_or_else(|| json!([])),
+        "last_success_at": verified.get("last_success_at").and_then(Value::as_str),
+        "last_success_status": verified.get("last_success_status").and_then(Value::as_u64),
+    });
+    let canonical = serde_json::to_string(&canonical)?;
+    Ok(sha256_hex(&canonical))
 }
 
 fn sha256_hex(input: &str) -> String {

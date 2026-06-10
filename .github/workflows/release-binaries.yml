@@ -120,6 +120,28 @@ jobs:
 
           "ASSET_PATH=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Check packaged archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $checkRoot = Join-Path "dist" "archive-check"
+          New-Item -ItemType Directory -Path $checkRoot -Force | Out-Null
+
+          if ("${{ matrix.archive }}" -eq "zip") {
+            Expand-Archive -Path $env:ASSET_PATH -DestinationPath $checkRoot -Force
+          } else {
+            tar -C $checkRoot -xzf $env:ASSET_PATH
+          }
+
+          $exe = if ($IsWindows) { ".exe" } else { "" }
+          $cli = Get-ChildItem -Path $checkRoot -Recurse -Filter "firstcall-cli$exe" |
+            Select-Object -First 1
+          if (-not $cli) {
+            throw "firstcall-cli$exe was not found in packaged archive"
+          }
+          & $cli.FullName version
+          & $cli.FullName --help
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:

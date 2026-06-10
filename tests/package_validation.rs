@@ -81,6 +81,16 @@ fn cli_help_includes_mcp_compile_smoke_usage() {
 }
 
 #[test]
+fn cli_help_flag_prints_usage_successfully() {
+    let output = validate_command().arg("--help").output().expect("run cli");
+    let combined = combined_output(&output);
+
+    assert!(output.status.success(), "{combined}");
+    assert!(combined.contains("firstcall-cli version"));
+    assert!(combined.contains("firstcall-cli validate-package --dir PATH"));
+}
+
+#[test]
 fn cli_validate_package_json_success() {
     let package = generate_package();
     let output = validate_command()

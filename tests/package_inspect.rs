@@ -63,7 +63,7 @@ fn cli_inspect_package_prints_static_safety_fields() {
     assert!(combined.contains("Requires local re-verification: yes"));
     assert!(combined.contains("Raw secrets imported: no"));
     assert!(combined.contains("Generated MCP server source of truth: no"));
-    assert!(combined.contains("Request fingerprint recomputation: deferred"));
+    assert!(combined.contains("Request fingerprint recomputation: matched"));
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn cli_inspect_package_json_ready_report() {
     assert_eq!(report["would_modify_app_storage"], false);
     assert_eq!(report["requires_local_re_verification"], true);
     assert_eq!(report["generated_mcp_server_source_of_truth"], false);
-    assert_eq!(report["request_fingerprint_recomputation"], "deferred");
+    assert_eq!(report["request_fingerprint_recomputation"], "matched");
     assert!(!String::from_utf8_lossy(&output.stdout).contains(RAW_SECRET));
     assert!(!String::from_utf8_lossy(&output.stderr).contains(RAW_SECRET));
 }
@@ -192,6 +192,25 @@ fn inspect_package_invalid_request_fingerprint_blocks() {
 }
 
 #[test]
+fn inspect_package_recipe_tamper_blocks_on_recomputed_fingerprint() {
+    let package = generate_package();
+    edit_recipe_yaml(package.path(), |recipe| {
+        recipe["name"] = Value::String("tampered_recipe".to_string());
+    });
+
+    let report = inspect_agent_package_dir(package.path());
+
+    assert_eq!(report.request_fingerprint_status.as_str(), "mismatched");
+    assert!(!report.is_ready());
+    assert!(
+        report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("request_fingerprint"))
+    );
+}
+
+#[test]
 fn cli_inspect_package_missing_manifest_reports_legacy_blocked() {
     let package = generate_package();
     fs::remove_file(package.path().join("package.manifest.json")).expect("remove manifest");
@@ -283,6 +302,16 @@ fn edit_json_file(root: &std::path::Path, relative: &str, edit: impl FnOnce(&mut
     edit(&mut value);
     fs::write(&path, serde_json::to_string_pretty(&value).expect("json")).expect("write json");
     refresh_manifest_hash(root, relative);
+}
+
+fn edit_recipe_yaml(root: &std::path::Path, edit: impl FnOnce(&mut Value)) {
+    let path = root.join("recipe.yaml");
+    let mut value: Value =
+        yaml_serde::from_str(&fs::read_to_string(&path).expect("read recipe yaml"))
+            .expect("parse recipe yaml");
+    edit(&mut value);
+    fs::write(&path, yaml_serde::to_string(&value).expect("recipe yaml")).expect("write yaml");
+    refresh_manifest_hash(root, "recipe.yaml");
 }
 
 fn refresh_manifest_hash(root: &std::path::Path, relative: &str) {

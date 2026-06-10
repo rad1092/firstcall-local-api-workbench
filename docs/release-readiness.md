@@ -61,18 +61,24 @@ cargo run --locked --bin firstcall-cli -- verify --recipe-json fixtures/github-u
 Remove-Item Env:FIRSTCALL_BEARER_TOKEN
 ```
 
-For generated MCP template compile confidence, run the build in a generated package directory:
+For generated MCP runtime confidence, verify a read-only recipe, build the
+generated server, and call it through the MCP stdio client:
 
 ```powershell
-cargo run --locked --bin firstcall-cli -- package --recipe-json fixtures/verified-agent-recipe.json --out ./dist/sample-agent-tool
-Push-Location ./dist/sample-agent-tool/mcp-server
+$env:FIRSTCALL_BEARER_TOKEN = gh auth token
+cargo run --locked --bin firstcall-cli -- verify --recipe-json fixtures/github-user-recipe.json --json --out ./tmp/github-user.verified.json --lock-out ./tmp/github-user.lock.json
+cargo run --locked --bin firstcall-cli -- package --recipe-json ./tmp/github-user.verified.json --out ./tmp/github-user-agent-tool
+Push-Location ./tmp/github-user-agent-tool/mcp-server
 npm install
 npm run build
 Pop-Location
-cargo run --locked --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool --mcp-compile-smoke
+node ./scripts/mcp_roundtrip_client.mjs --package-dir ./tmp/github-user-agent-tool/mcp-server --tool github_authenticated_user --args "{}"
+Remove-Item Env:FIRSTCALL_BEARER_TOKEN
 ```
 
-The live GitHub check sends a read-only GET request. The MCP compile check does not run the generated server.
+The live GitHub and generated MCP checks send read-only GET requests. They use
+environment variables for secrets and must not write raw tokens into repo files,
+logs, GIFs, or release assets.
 
 ## Lifecycle Contract
 
@@ -90,7 +96,9 @@ The CLI-first lifecycle expected for a release candidate is:
 `tests/lifecycle_cli.rs` covers this flow with local temp files, temp SQLite storage, and loopback HTTP only.
 The CLI lifecycle GitHub Actions workflow also runs this storage-backed flow
 through actual `verify --recipe-id` against a local loopback server and then
-validates the re-exported package.
+validates the re-exported package. It also installs generated MCP dependencies,
+builds the generated server, and calls the generated tool against the loopback
+server.
 
 ## Binary Release Assets
 
@@ -110,13 +118,14 @@ upload deterministic assets with `--clobber`.
 After a release workflow run, verify:
 
 ```powershell
-gh release view v0.1.0 --repo rad1092/firstcall-local-api-workbench --json assets,url
+gh release view <tag> --repo rad1092/firstcall-local-api-workbench --json assets,url
 ```
 
 Download at least one archive and run the packaged CLI:
 
 ```powershell
 firstcall-cli version
+firstcall-cli --help
 ```
 
 ## Safety Checks
@@ -164,10 +173,7 @@ Use this when README demo assets may have drifted:
 
 Do not run or require:
 
-- generated MCP runtime execution
-- `npm install`, `npm build`, Node, TypeScript compilation, or MCP Inspector
-- external live HTTP tests
 - a cloud backend
 - desktop UI import
 - database schema migrations
-- dependency or workflow changes
+- MCP Inspector

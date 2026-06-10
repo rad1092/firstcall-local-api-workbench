@@ -82,7 +82,7 @@ The generated package includes:
 
 Raw secrets are never exported. Secret values are represented as environment variable references such as `FIRSTCALL_BEARER_TOKEN` or `FIRSTCALL_API_KEY`.
 
-Generated `mcp-server/` files are template artifacts. They are not source of truth for package import, and default Rust tests do not run npm, Node, TypeScript compilation, MCP Inspector, or the generated MCP runtime.
+Generated `mcp-server/` files are template artifacts. They are not source of truth for package import. Static package validation does not install Node dependencies or execute generated MCP code; the CI lifecycle workflow runs a separate generated MCP round-trip after package export.
 
 ## Validate, Inspect, And Import
 
@@ -166,4 +166,5 @@ Imported recipes require local re-verification before `package --recipe-id` can 
 
 The CLI lifecycle GitHub Actions workflow runs this storage-backed flow with
 `firstcall-cli --no-default-features`, actual local loopback HTTP verification,
-and validation/inspection of the re-exported package.
+validation/inspection of the re-exported package, and a generated MCP stdio
+round-trip against the loopback server.

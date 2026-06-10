@@ -126,7 +126,11 @@ fn recipe_from_agent_recipe_yaml(value: &Value) -> Result<Recipe> {
         url_template,
         headers_template: headers_from_object(value.get("headers"), &slot_requirements),
         query_template: query_from_object(value.get("query"), &slot_requirements),
-        body_template: body_template(value.get("body_template")),
+        body_template: body_template(
+            value.get("body_kind").and_then(Value::as_str),
+            value.get("body_template"),
+            &slot_requirements,
+        ),
         auth_style,
         slots,
         last_success_at: None,
@@ -270,17 +274,56 @@ fn field_required(value: &str, slot_requirements: &BTreeMap<String, bool>) -> bo
         .any(|name| *slot_requirements.get(name).unwrap_or(&true))
 }
 
-fn body_template(value: Option<&Value>) -> BodyTemplate {
+fn body_template(
+    kind: Option<&str>,
+    value: Option<&Value>,
+    slot_requirements: &BTreeMap<String, bool>,
+) -> BodyTemplate {
     let Some(value) = value else {
         return BodyTemplate::None;
     };
     if value.is_null() || value.as_object().is_some_and(Map::is_empty) {
         return BodyTemplate::None;
     }
+    let kind = kind.unwrap_or("json").to_ascii_lowercase();
     let converted = convert_json_placeholders(value);
-    BodyTemplate::Json {
-        template: serde_json::to_string(&converted).unwrap_or_else(|_| "{}".to_string()),
+    match kind.as_str() {
+        "none" => BodyTemplate::None,
+        "text" => BodyTemplate::Text {
+            text: stringify_template_value(&converted),
+        },
+        "form" => BodyTemplate::Form {
+            fields: fields_from_body_object(&converted, slot_requirements),
+        },
+        "multipart" => BodyTemplate::Multipart {
+            fields: fields_from_body_object(&converted, slot_requirements),
+        },
+        _ => BodyTemplate::Json {
+            template: serde_json::to_string(&converted).unwrap_or_else(|_| "{}".to_string()),
+        },
     }
+}
+
+fn fields_from_body_object(
+    value: &Value,
+    slot_requirements: &BTreeMap<String, bool>,
+) -> Vec<KeyValueField> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    object
+        .iter()
+        .map(|(key, value)| {
+            let value = stringify_template_value(value);
+            KeyValueField {
+                key: key.clone(),
+                required: field_required(&value, slot_requirements),
+                value,
+                description: "Imported from agent package body template".to_string(),
+                confidence: Confidence::High,
+            }
+        })
+        .collect()
 }
 
 fn stringify_template_value(value: &Value) -> String {

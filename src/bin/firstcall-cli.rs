@@ -37,6 +37,10 @@ fn run() -> Result<()> {
         bail!("missing command");
     };
     match command {
+        "help" | "--help" | "-h" => {
+            print_help();
+            Ok(())
+        }
         "version" => {
             println!("firstcall-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -776,7 +780,10 @@ fn print_package_inspect_report(report: &PackageInspectReport) {
     println!("Requires local re-verification: yes");
     println!("Raw secrets imported: no");
     println!("Generated MCP server source of truth: no");
-    println!("Request fingerprint recomputation: deferred");
+    println!(
+        "Request fingerprint recomputation: {}",
+        report.request_fingerprint_status.as_str()
+    );
     println!(
         "Validation checks passed: {}",
         report.validation.checks_passed.len()
@@ -823,7 +830,7 @@ fn print_package_inspect_json(report: &PackageInspectReport) -> Result<()> {
         "requires_local_re_verification": true,
         "raw_secrets_imported": false,
         "generated_mcp_server_source_of_truth": false,
-        "request_fingerprint_recomputation": "deferred",
+        "request_fingerprint_recomputation": report.request_fingerprint_status.as_str(),
         "validation": {
             "checks_passed": report.validation.checks_passed,
             "warnings": report.validation.warnings,

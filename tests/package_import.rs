@@ -4,7 +4,7 @@ use std::process::Command;
 
 use firstcall::export::agent_package::export_agent_package;
 use firstcall::export::package_import::import_agent_package_dir;
-use firstcall::model::{AuthStyle, BodyTemplate, Recipe};
+use firstcall::model::{AuthStyle, BodyTemplate, Confidence, KeyValueField, Recipe};
 use firstcall::store::db::{AppPaths, open_database};
 use firstcall::store::repos::AppRepository;
 use serde_json::{Value, json};
@@ -122,6 +122,43 @@ fn cli_import_package_json_imports_recipe_into_temp_sqlite() {
     let imported = single_imported_recipe(&data_dir, &config_dir);
     assert_eq!(imported.last_success_at, None);
     assert_eq!(imported.last_success_status, None);
+}
+
+#[test]
+fn import_preserves_text_and_form_body_kinds() {
+    let mut text_recipe = fixture_recipe();
+    text_recipe.body_template = BodyTemplate::Text {
+        text: "message={{email}}".to_string(),
+    };
+    let text_package = package_for_recipe(&text_recipe);
+    let text_storage = tempdir().expect("text storage");
+    let text_imported = import_single_recipe(text_package.path(), text_storage.path());
+    match &text_imported.body_template {
+        BodyTemplate::Text { text } => assert_eq!(text, "message={{email}}"),
+        other => panic!("unexpected text body import: {other:?}"),
+    }
+
+    let mut form_recipe = fixture_recipe();
+    form_recipe.body_template = BodyTemplate::Form {
+        fields: vec![KeyValueField {
+            key: "email".to_string(),
+            value: "{{email}}".to_string(),
+            required: true,
+            description: "Email".to_string(),
+            confidence: Confidence::High,
+        }],
+    };
+    let form_package = package_for_recipe(&form_recipe);
+    let form_storage = tempdir().expect("form storage");
+    let form_imported = import_single_recipe(form_package.path(), form_storage.path());
+    match &form_imported.body_template {
+        BodyTemplate::Form { fields } => {
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].key, "email");
+            assert_eq!(fields[0].value, "{{email}}");
+        }
+        other => panic!("unexpected form body import: {other:?}"),
+    }
 }
 
 #[test]
@@ -265,9 +302,17 @@ fn unsupported_auth_type_blocks_import_without_sqlite_write() {
 
     assert!(!report.imported());
     assert!(report.blockers.iter().any(|blocker| {
-        blocker.contains("auth type is not supported")
+        blocker.contains("package validation has errors")
             || blocker.contains("package recipe conversion failed")
     }));
+    assert!(
+        report
+            .inspect_report
+            .validation
+            .errors
+            .iter()
+            .any(|error| error.contains("auth type is not supported"))
+    );
     assert!(!paths.db_path.exists());
     assert!(!debug.contains(RAW_SECRET));
 }
@@ -385,12 +430,27 @@ fn cli_import_requires_both_storage_override_dirs() {
 }
 
 fn generate_package() -> TempDir {
-    let recipe: Recipe =
-        serde_json::from_str(include_str!("../fixtures/verified-agent-recipe.json"))
-            .expect("fixture recipe");
+    package_for_recipe(&fixture_recipe())
+}
+
+fn fixture_recipe() -> Recipe {
+    serde_json::from_str(include_str!("../fixtures/verified-agent-recipe.json"))
+        .expect("fixture recipe")
+}
+
+fn package_for_recipe(recipe: &Recipe) -> TempDir {
     let dir = tempdir().expect("tempdir");
-    export_agent_package(&recipe, dir.path()).expect("export package");
+    export_agent_package(recipe, dir.path()).expect("export package");
     dir
+}
+
+fn import_single_recipe(package_dir: &Path, storage_root: &Path) -> Recipe {
+    let data_dir = storage_root.join("data");
+    let config_dir = storage_root.join("config");
+    let paths = AppPaths::from_root(&data_dir, &config_dir).expect("paths");
+    let report = import_agent_package_dir(package_dir, &paths).expect("import report");
+    assert!(report.imported(), "blockers: {:?}", report.blockers);
+    single_imported_recipe(&data_dir, &config_dir)
 }
 
 fn import_command() -> Command {

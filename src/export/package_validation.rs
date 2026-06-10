@@ -280,7 +280,7 @@ fn validate_recipe_yaml(root: &Path, report: &mut PackageValidationReport) {
     check_u64_field(report, &value, "recipe.yaml", "schema_version", 1);
     check_string_field(report, &value, "recipe.yaml", "generator", Some(GENERATOR));
 
-    for field in ["name", "method", "url_template"] {
+    for field in ["name", "method", "url_template", "body_kind"] {
         check_required_string(report, &value, "recipe.yaml", field);
     }
     for field in ["auth", "verified", "security"] {
@@ -292,11 +292,37 @@ fn validate_recipe_yaml(root: &Path, report: &mut PackageValidationReport) {
     }
 
     validate_recipe_method(&value, report);
+    validate_recipe_auth(&value, report);
+    validate_recipe_body_kind(&value, report);
     validate_recipe_url_template(&value, report);
     validate_recipe_verified(&value, report);
     validate_recipe_security(&value, report);
     validate_recipe_executable_redaction(&value, report);
     scan_structured_secretish_values(report, "recipe.yaml", &value);
+}
+
+fn validate_recipe_auth(value: &Value, report: &mut PackageValidationReport) {
+    let Some(auth) = value.get("auth").and_then(Value::as_object) else {
+        return;
+    };
+    match auth.get("type").and_then(Value::as_str).unwrap_or("none") {
+        "none" | "bearer" | "basic" | "header_api_key" | "query_api_key" => {
+            report.pass("recipe.yaml auth type is supported");
+        }
+        _ => report.error("recipe.yaml auth type is not supported"),
+    }
+}
+
+fn validate_recipe_body_kind(value: &Value, report: &mut PackageValidationReport) {
+    let Some(kind) = value.get("body_kind").and_then(Value::as_str) else {
+        return;
+    };
+    match kind {
+        "none" | "json" | "text" | "form" | "multipart" => {
+            report.pass("recipe.yaml body_kind is supported");
+        }
+        _ => report.error("recipe.yaml body_kind must be none, json, text, form, or multipart"),
+    }
 }
 
 fn validate_recipe_method(value: &Value, report: &mut PackageValidationReport) {

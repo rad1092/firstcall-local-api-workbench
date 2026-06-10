@@ -7,8 +7,8 @@ use serde_json::Value;
 use crate::model::{AuthStyle, Recipe};
 
 use super::agent_common::{
-    ExportSlot, GENERATOR, TAGLINE, all_env_requirements, auth_type, body_template_value,
-    export_slots, non_auth_headers_map, non_auth_query_map, recipe_slug,
+    ExportSlot, GENERATOR, TAGLINE, all_env_requirements, auth_type, body_kind,
+    body_template_value, export_slots, non_auth_headers_map, non_auth_query_map, recipe_slug,
     sanitize_url_template_for_agent,
 };
 
@@ -23,6 +23,7 @@ struct AgentRecipeYaml {
     auth: AgentAuthYaml,
     headers: BTreeMap<String, String>,
     query: BTreeMap<String, String>,
+    body_kind: String,
     body_template: Value,
     slots: Vec<ExportSlot>,
     verified: VerifiedYaml,
@@ -70,6 +71,7 @@ pub fn recipe_to_agent_yaml(recipe: &Recipe) -> Result<String> {
         auth: auth_yaml(&recipe.auth_style),
         headers: non_auth_headers_map(recipe),
         query: non_auth_query_map(recipe),
+        body_kind: body_kind(&recipe.body_template).to_string(),
         body_template: body_template_value(&recipe.body_template),
         slots: export_slots(&recipe.slots),
         verified: VerifiedYaml {

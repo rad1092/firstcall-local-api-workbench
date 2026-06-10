@@ -6,13 +6,32 @@ use serde_json::Value;
 use super::agent_common::parse_url_template;
 use super::package_manifest::MANIFEST_FILE;
 use super::package_validation::{PackageValidationReport, validate_agent_package_dir};
+use super::verified_lock::request_fingerprint_for_agent_recipe_yaml;
 
 #[derive(Clone, Debug)]
 pub struct PackageInspectReport {
     pub package_dir: PathBuf,
     pub validation: PackageValidationReport,
     pub manifest_present: bool,
+    pub request_fingerprint_status: RequestFingerprintStatus,
     pub blockers: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestFingerprintStatus {
+    Matched,
+    Mismatched,
+    Unavailable,
+}
+
+impl RequestFingerprintStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Matched => "matched",
+            Self::Mismatched => "mismatched",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 impl PackageInspectReport {
@@ -58,12 +77,14 @@ pub fn inspect_agent_package_dir(path: &Path) -> PackageInspectReport {
     }
 
     inspect_recipe_policy_reconciliation(path, &mut blockers);
-    inspect_verified_lock(path, &mut blockers);
+    let mut request_fingerprint_status = RequestFingerprintStatus::Unavailable;
+    inspect_verified_lock(path, &mut blockers, &mut request_fingerprint_status);
 
     PackageInspectReport {
         package_dir: path.to_path_buf(),
         validation,
         manifest_present,
+        request_fingerprint_status,
         blockers,
     }
 }
@@ -118,7 +139,11 @@ fn inspect_recipe_policy_reconciliation(root: &Path, blockers: &mut Vec<String>)
     }
 }
 
-fn inspect_verified_lock(root: &Path, blockers: &mut Vec<String>) {
+fn inspect_verified_lock(
+    root: &Path,
+    blockers: &mut Vec<String>,
+    request_fingerprint_status: &mut RequestFingerprintStatus,
+) {
     let Some(lock) = read_json(root, "verified.lock.json", blockers) else {
         return;
     };
@@ -133,11 +158,37 @@ fn inspect_verified_lock(root: &Path, blockers: &mut Vec<String>) {
                 .to_string(),
         ),
     }
-    match lock.get("request_fingerprint").and_then(Value::as_str) {
+    let request_fingerprint = lock.get("request_fingerprint").and_then(Value::as_str);
+    match request_fingerprint {
         Some(value) if is_sha256_hex(value) => {}
         _ => blockers.push(
             "verified.lock.json request_fingerprint must be 64-character lowercase hex".to_string(),
         ),
+    }
+    let Some(request_fingerprint) = request_fingerprint else {
+        return;
+    };
+    if !is_sha256_hex(request_fingerprint) {
+        return;
+    }
+    let Some(recipe) = read_yaml(root, "recipe.yaml", blockers) else {
+        return;
+    };
+    match request_fingerprint_for_agent_recipe_yaml(&recipe) {
+        Ok(expected) if expected == request_fingerprint => {
+            *request_fingerprint_status = RequestFingerprintStatus::Matched;
+        }
+        Ok(_) => {
+            *request_fingerprint_status = RequestFingerprintStatus::Mismatched;
+            blockers.push(
+                "verified.lock.json request_fingerprint does not match recipe.yaml".to_string(),
+            );
+        }
+        Err(_) => {
+            *request_fingerprint_status = RequestFingerprintStatus::Unavailable;
+            blockers
+                .push("verified.lock.json request_fingerprint could not be recomputed".to_string());
+        }
     }
 }
 
