@@ -18,11 +18,14 @@ FirstCall is a local-first Rust workbench for turning API request sources into v
 
 <img src="docs/assets/firstcall-cli-demo.gif" alt="FirstCall release download, CLI, package, and MCP demo" width="900">
 
+<img src="docs/assets/firstcall-gui-workbench.gif" alt="FirstCall desktop GUI parsing a sample request and reading CLI-created recipe storage" width="900">
+
 ## Download
 
 Download the archive for your OS from [GitHub Releases](https://github.com/rad1092/firstcall-local-api-workbench/releases), extract it, then run:
 
 ```powershell
+firstcall --screen new --sample curl
 firstcall-cli version
 firstcall-cli --help
 ```
@@ -31,6 +34,12 @@ Each release archive includes:
 
 - `firstcall`: desktop GUI workbench.
 - `firstcall-cli`: automation CLI for agents, CI, and scripts.
+
+The desktop GUI can be started against an isolated store for repeatable demos or validation:
+
+```powershell
+firstcall --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config --screen recipes
+```
 
 ## Quick Start
 
@@ -56,7 +65,7 @@ Generated packages include `recipe.yaml`, `verified.lock.json`, `policy.json`, `
 - [Release readiness](docs/release-readiness.md)
 - [Product surfaces](docs/surfaces.md)
 - [Architecture](docs/architecture.md)
-- [Non-goals and limits](docs/non-goals.md)
+- [Support boundaries](docs/support-boundaries.md)
 - [Contributing](CONTRIBUTING.md)
 
 ## Contributors

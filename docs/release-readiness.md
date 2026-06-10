@@ -142,6 +142,8 @@ firstcall-cli --help
 Use this as a local human smoke pass for the desktop workbench:
 
 - `cargo run` opens the desktop GUI.
+- `firstcall --screen new --sample curl` opens the GUI with the curl sample parsed into a candidate.
+- `firstcall --data-dir ./tmp/firstcall-data --config-dir ./tmp/firstcall-config --screen recipes` opens the GUI against an isolated store.
 - The source selector includes `curl`, docs, OpenAPI, Postman Collection, HAR, `.http` / `.rest`, Hurl, and Bruno/OpenCollection.
 - The curl sample still analyzes and produces at least one candidate.
 - At least one non-curl source kind is reachable from the selector.
@@ -160,6 +162,7 @@ Use this as a local human smoke pass for the desktop workbench:
 Use this when README demo assets may have drifted:
 
 - The GUI demo GIF still matches the current FirstCall desktop GUI.
+- The GUI demo GIF is captured from an actual `firstcall.exe` window, preferably release profile or a downloaded release asset.
 - The CLI demo GIF still matches current `firstcall-cli` behavior.
 - `docs/assets/firstcall-cli.cast` commands match the displayed output mode.
 - If the cast uses `--json`, output must be JSON-shaped.
@@ -169,7 +172,7 @@ Use this when README demo assets may have drifted:
 - Demo assets should be refreshed after major GUI flow or CLI lifecycle output changes.
 - Demo refresh is not required for every code-only change.
 
-## Non-Goals For Release Validation
+## Release Validation Scope
 
 Do not run or require:
 

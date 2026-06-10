@@ -217,9 +217,21 @@ pub struct FirstCallApp {
     running_execution: Option<RunningExecution>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct BootstrapOptions {
+    pub paths: Option<AppPaths>,
+    pub initial_screen: Option<TopScreen>,
+    pub sample_tab: Option<InputTab>,
+}
+
 impl FirstCallApp {
     pub fn bootstrap(_cc: &eframe::CreationContext<'_>) -> Self {
-        let (paths, repository, bootstrap_warning) = bootstrap_repository();
+        Self::bootstrap_with_options(BootstrapOptions::default())
+    }
+
+    pub fn bootstrap_with_options(options: BootstrapOptions) -> Self {
+        let initial_screen = options.initial_screen.unwrap_or(TopScreen::NewAttempt);
+        let (paths, repository, bootstrap_warning) = bootstrap_repository(options.paths);
         let settings = repository.load_settings().unwrap_or_default();
         let attempts = repository.list_attempts().unwrap_or_default();
         let recipes = repository.list_recipes().unwrap_or_default();
@@ -227,8 +239,8 @@ impl FirstCallApp {
         let secret_status = secret_store.status();
         let http_client = build_http_client(&settings).unwrap_or_else(|_| Client::new());
 
-        Self {
-            screen: TopScreen::NewAttempt,
+        let mut app = Self {
+            screen: initial_screen,
             inputs: InputBuffers {
                 active_tab: InputTab::Curl,
                 ..InputBuffers::default()
@@ -253,7 +265,15 @@ impl FirstCallApp {
             status_message: bootstrap_warning.clone(),
             bootstrap_warning,
             running_execution: None,
+        };
+
+        if let Some(sample_tab) = options.sample_tab {
+            app.inputs.active_tab = sample_tab;
+            app.load_sample_for_active_tab();
+            app.analyze_inputs();
         }
+
+        app
     }
 
     pub fn analyze_inputs(&mut self) {
@@ -682,7 +702,9 @@ impl eframe::App for FirstCallApp {
     }
 }
 
-fn bootstrap_repository() -> (AppPaths, AppRepository, Option<String>) {
+fn bootstrap_repository(
+    paths_override: Option<AppPaths>,
+) -> (AppPaths, AppRepository, Option<String>) {
     let fallback_root = std::env::temp_dir().join("firstcall_fallback");
     let fallback_paths =
         AppPaths::from_root(&fallback_root.join("data"), &fallback_root.join("config"))
@@ -693,9 +715,13 @@ fn bootstrap_repository() -> (AppPaths, AppRepository, Option<String>) {
                 db_path: fallback_root.join("data").join("firstcall.sqlite3"),
             });
 
-    match AppPaths::discover()
-        .and_then(|paths| open_database(&paths).map(|connection| (paths, connection)))
-    {
+    let repository_result = match paths_override {
+        Some(paths) => open_database(&paths).map(|connection| (paths, connection)),
+        None => AppPaths::discover()
+            .and_then(|paths| open_database(&paths).map(|connection| (paths, connection))),
+    };
+
+    match repository_result {
         Ok((paths, connection)) => (paths, AppRepository::new(connection), None),
         Err(error) => {
             let warning = format!(

@@ -538,7 +538,7 @@ Open questions:
 - Whether legacy packages without `package.manifest.json` should be importable behind an explicit flag.
 - Whether future `recipe-export-json` should expose only safe/redacted recipe fields.
 
-## Non-Goals
+## Adjacent Work
 
 This document does not define implementation details for:
 
