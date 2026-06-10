@@ -68,7 +68,4 @@ Generated packages include `recipe.yaml`, `verified.lock.json`, `policy.json`, `
 - [Support boundaries](docs/support-boundaries.md)
 - [Contributing](CONTRIBUTING.md)
 
-## Contributors
 
-- rad1092
-- OpenAI Codex, AI-assisted engineering
