@@ -7,6 +7,7 @@
 ██╔══╝  ██║██╔══██╗╚════██║   ██║   ██║     ██╔══██║██║     ██║
 ██║     ██║██║  ██║███████║   ██║   ╚██████╗██║  ██║███████╗███████╗
 ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝╚══════╝
+
 ```
 
 **Local-first Rust workbench that turns raw API requests into verified, redacted, agent-ready tool packages.**
