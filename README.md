@@ -1,20 +1,25 @@
-# FirstCall
+<div align="center">
+
+```
+███████╗██╗██████╗ ███████╗████████╗ ██████╗ █████╗ ██╗     ██╗
+██╔════╝██║██╔══██╗██╔════╝╚══██╔══╝██╔════╝██╔══██╗██║     ██║
+█████╗  ██║██████╔╝███████╗   ██║   ██║     ███████║██║     ██║
+██╔══╝  ██║██╔══██╗╚════██║   ██║   ██║     ██╔══██║██║     ██║
+██║     ██║██║  ██║███████║   ██║   ╚██████╗██║  ██║███████╗███████╗
+╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝   ╚═╝    ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝
+```
+
+**Local-first Rust workbench that turns raw API requests into verified, redacted, agent-ready tool packages.**
 
 [![CI](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/ci.yml)
 [![CLI lifecycle](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/cli-lifecycle.yml/badge.svg?branch=main)](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/cli-lifecycle.yml)
-[![Release binaries](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/release-binaries.yml/badge.svg)](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/release-binaries.yml)
+[![Loopback verify](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/loopback-verify.yml/badge.svg?branch=main)](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/loopback-verify.yml)
 [![Security audit](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/rad1092/firstcall-local-api-workbench/actions/workflows/security.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-```text
-  ______ _          _    _____      _ _
- |  ____(_)        | |  / ____|    | | |
- | |__   _ _ __ ___| |_| |     __ _| | |
- |  __| | | '__/ __| __| |    / _` | | |
- | |    | | |  \__ \ |_| |___| (_| | | |
- |_|    |_|_|  |___/\__|\_____\__,_|_|_|
-```
+</div>
 
-FirstCall is a local-first Rust workbench for turning API request sources into verified, redacted, agent-ready recipe packages. Its useful part is the trust chain: parse a request, verify it locally, export a package, inspect/import it, then re-verify before storage-backed re-export.
+FirstCall is a local-first Rust workbench for turning API request sources into verified, redacted, agent-ready recipe packages. Its useful part is the trust chain: parse a request, verify it locally, export a package, inspect/import it, then re-verify before storage-backed re-export. Every exported package ships a runnable MCP server, so a recipe becomes a callable agent tool.
 
 <img src="docs/assets/firstcall-cli-demo.gif" alt="FirstCall release download, CLI, package, and MCP demo" width="900">
 
