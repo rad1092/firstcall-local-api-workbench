@@ -4,7 +4,9 @@ use regex::Regex;
 use url::Url;
 
 use crate::exec::client::{build_http_client, execute_request};
-use crate::exec::redact::{REDACTED, is_secret_key, redact_body, redact_header_value};
+use crate::exec::redact::{
+    REDACTED, is_secret_key, redact_body, redact_header_value, sanitize_response_schema,
+};
 use crate::export::agent_package::sanitized_agent_url_template;
 use crate::model::{
     AppSettings, AuthStyle, BodyTemplate, Confidence, ExecutionResult, FieldConfidence,
@@ -197,7 +199,7 @@ where
             overall: Confidence::High,
             notes: "Loaded from recipe JSON for local verification".to_string(),
         },
-        response_schema: None,
+        response_schema: recipe.response_schema.clone(),
         unsupported_reason: None,
         source_kinds: Vec::new(),
     };
@@ -235,6 +237,10 @@ pub fn redacted_recipe_for_verify_output(recipe: &Recipe) -> Recipe {
         .collect();
     output.body_template = redact_body_template(&output.body_template);
     output.slots = output.slots.iter().map(redact_slot).collect();
+    output.response_schema = output
+        .response_schema
+        .as_ref()
+        .map(sanitize_response_schema);
     output
 }
 
@@ -997,6 +1003,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use chrono::{DateTime, Utc};
+    use serde_json::json;
 
     use super::{
         VerifyOptions, prepare_draft_for_verify_with_env, redacted_recipe_for_verify_output,
@@ -1005,7 +1012,7 @@ mod tests {
     use crate::exec::redact::redact_draft_for_storage;
     use crate::model::{
         AuthStyle, BodyTemplate, Confidence, HeaderField, KeyValueField, Recipe, RuntimeSlot,
-        SlotLocation,
+        SchemaSpec, SlotLocation,
     };
 
     const RAW_SECRET: &str = "raw_secret_for_unit_test";
@@ -1062,6 +1069,31 @@ mod tests {
         assert!(!blockers.contains(RAW_SECRET));
     }
 
+    #[test]
+    fn verify_draft_preserves_schema_and_verify_output_sanitizes_it() {
+        let mut recipe = fake_recipe();
+        recipe.response_schema = Some(SchemaSpec {
+            name: Some("response".to_string()),
+            schema: json!({
+                "type": "object",
+                "examples": [{ "token": "raw_example_secret" }],
+                "properties": {
+                    "token": { "type": "string", "const": "raw_const_secret" },
+                    "id": { "type": "string" }
+                }
+            }),
+        });
+
+        let draft = prepare_draft_for_verify_with_env(&recipe, |_| Some("runtime".to_string()))
+            .expect("verify draft");
+        assert_eq!(draft.response_schema, recipe.response_schema);
+
+        let redacted = redacted_recipe_for_verify_output(&recipe);
+        let schema = redacted.response_schema.expect("sanitized response schema");
+        assert!(schema.schema.get("examples").is_none());
+        assert!(schema.schema["properties"]["token"].get("const").is_none());
+    }
+
     fn fake_recipe() -> Recipe {
         Recipe {
             id: None,
@@ -1106,6 +1138,7 @@ mod tests {
                     confidence: Confidence::High,
                 },
             ],
+            response_schema: None,
             last_success_at: Some(verified_time()),
             last_success_status: Some(200),
         }

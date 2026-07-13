@@ -2,11 +2,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::agent_common::parse_url_template;
 use super::package_manifest::MANIFEST_FILE;
 use super::package_validation::{PackageValidationReport, validate_agent_package_dir};
-use super::verified_lock::request_fingerprint_for_agent_recipe_yaml;
+use super::verified_lock::{
+    request_fingerprint_for_agent_recipe_yaml, response_schema_fingerprint_for_agent_recipe_yaml,
+};
 
 #[derive(Clone, Debug)]
 pub struct PackageInspectReport {
@@ -65,6 +68,12 @@ impl PackageInspectReport {
 }
 
 pub fn inspect_agent_package_dir(path: &Path) -> PackageInspectReport {
+    inspect_agent_package_for_import(path).0
+}
+
+pub(crate) fn inspect_agent_package_for_import(
+    path: &Path,
+) -> (PackageInspectReport, Option<Value>) {
     let validation = validate_agent_package_dir(path);
     let manifest_present = path.join(MANIFEST_FILE).symlink_metadata().is_ok();
     let mut blockers = Vec::new();
@@ -76,21 +85,33 @@ pub fn inspect_agent_package_dir(path: &Path) -> PackageInspectReport {
         blockers.push("package.manifest.json is required for import readiness".to_string());
     }
 
-    inspect_recipe_policy_reconciliation(path, &mut blockers);
-    let mut request_fingerprint_status = RequestFingerprintStatus::Unavailable;
-    inspect_verified_lock(path, &mut blockers, &mut request_fingerprint_status);
-
-    PackageInspectReport {
-        package_dir: path.to_path_buf(),
-        validation,
-        manifest_present,
-        request_fingerprint_status,
-        blockers,
+    let recipe_snapshot = read_yaml_snapshot(path, "recipe.yaml", &mut blockers);
+    if let Some((bytes, _)) = &recipe_snapshot {
+        inspect_recipe_snapshot_manifest_hash(path, bytes, &mut blockers);
     }
+    let recipe = recipe_snapshot.as_ref().map(|(_, recipe)| recipe);
+    inspect_recipe_policy_reconciliation(path, recipe, &mut blockers);
+    let mut request_fingerprint_status = RequestFingerprintStatus::Unavailable;
+    inspect_verified_lock(path, recipe, &mut blockers, &mut request_fingerprint_status);
+
+    (
+        PackageInspectReport {
+            package_dir: path.to_path_buf(),
+            validation,
+            manifest_present,
+            request_fingerprint_status,
+            blockers,
+        },
+        recipe_snapshot.map(|(_, recipe)| recipe),
+    )
 }
 
-fn inspect_recipe_policy_reconciliation(root: &Path, blockers: &mut Vec<String>) {
-    let Some(recipe) = read_yaml(root, "recipe.yaml", blockers) else {
+fn inspect_recipe_policy_reconciliation(
+    root: &Path,
+    recipe: Option<&Value>,
+    blockers: &mut Vec<String>,
+) {
+    let Some(recipe) = recipe else {
         return;
     };
     let Some(policy) = read_json(root, "policy.json", blockers) else {
@@ -141,6 +162,7 @@ fn inspect_recipe_policy_reconciliation(root: &Path, blockers: &mut Vec<String>)
 
 fn inspect_verified_lock(
     root: &Path,
+    recipe: Option<&Value>,
     blockers: &mut Vec<String>,
     request_fingerprint_status: &mut RequestFingerprintStatus,
 ) {
@@ -171,10 +193,10 @@ fn inspect_verified_lock(
     if !is_sha256_hex(request_fingerprint) {
         return;
     }
-    let Some(recipe) = read_yaml(root, "recipe.yaml", blockers) else {
+    let Some(recipe) = recipe else {
         return;
     };
-    match request_fingerprint_for_agent_recipe_yaml(&recipe) {
+    match request_fingerprint_for_agent_recipe_yaml(recipe) {
         Ok(expected) if expected == request_fingerprint => {
             *request_fingerprint_status = RequestFingerprintStatus::Matched;
         }
@@ -190,18 +212,90 @@ fn inspect_verified_lock(
                 .push("verified.lock.json request_fingerprint could not be recomputed".to_string());
         }
     }
+
+    let response_fingerprint = lock
+        .get("response_schema_fingerprint")
+        .and_then(Value::as_str);
+    match response_fingerprint {
+        Some(value) if is_sha256_hex(value) => {
+            match response_schema_fingerprint_for_agent_recipe_yaml(recipe) {
+                Ok(expected) if expected == value => {}
+                Ok(_) => blockers.push(
+                    "verified.lock.json response_schema_fingerprint does not match recipe.yaml"
+                        .to_string(),
+                ),
+                Err(_) => blockers.push(
+                    "verified.lock.json response_schema_fingerprint could not be recomputed"
+                        .to_string(),
+                ),
+            }
+        }
+        _ => blockers.push(
+            "verified.lock.json response_schema_fingerprint must be 64-character lowercase hex"
+                .to_string(),
+        ),
+    }
 }
 
-fn read_yaml(root: &Path, relative: &str, blockers: &mut Vec<String>) -> Option<Value> {
-    let text = read_text(root, relative, blockers)?;
-    match yaml_serde::from_str::<Value>(&text) {
-        Ok(value) => Some(value),
+fn read_yaml_snapshot(
+    root: &Path,
+    relative: &str,
+    blockers: &mut Vec<String>,
+) -> Option<(Vec<u8>, Value)> {
+    let bytes = match fs::read(root.join(relative)) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            blockers.push(format!("{relative} could not be read for import readiness"));
+            return None;
+        }
+    };
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            blockers.push(format!("{relative} must be UTF-8 for import readiness"));
+            return None;
+        }
+    };
+    match yaml_serde::from_str::<Value>(text) {
+        Ok(value) => Some((bytes, value)),
         Err(_) => {
             blockers.push(format!(
                 "{relative} could not be parsed for import readiness"
             ));
             None
         }
+    }
+}
+
+fn inspect_recipe_snapshot_manifest_hash(
+    root: &Path,
+    recipe_bytes: &[u8],
+    blockers: &mut Vec<String>,
+) {
+    let Some(manifest) = read_json(root, MANIFEST_FILE, blockers) else {
+        return;
+    };
+    let expected = manifest
+        .get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| {
+            files.iter().find_map(|entry| {
+                (entry.get("path").and_then(Value::as_str) == Some("recipe.yaml"))
+                    .then(|| entry.get("sha256").and_then(Value::as_str))
+                    .flatten()
+            })
+        });
+    let Some(expected) = expected else {
+        blockers.push("package manifest does not cover the recipe snapshot".to_string());
+        return;
+    };
+    let digest = Sha256::digest(recipe_bytes);
+    let actual = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual != expected {
+        blockers.push("recipe snapshot does not match package manifest".to_string());
     }
 }
 

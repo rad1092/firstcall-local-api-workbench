@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::merge::endpoint_merge_keys;
 use crate::model::{
     AuthStyle, BodyTemplate, Confidence, EvidenceItem, FieldConfidence, HeaderField, KeyValueField,
     ParsedSource, RequestDraft, RuntimeSlot, SlotLocation, SourceInput, SourceKind,
@@ -42,7 +43,6 @@ pub fn parse_docs_input(raw_text: &str) -> ParsedSource {
     let mut notes = Vec::new();
 
     let curl_candidates = extract_curl_candidates(raw_text);
-    let mut seen = BTreeMap::<String, usize>::new();
     for mut candidate in curl_candidates {
         candidate.source_kinds = vec![SourceKind::Docs];
         candidate.confidence = FieldConfidence {
@@ -55,25 +55,8 @@ pub fn parse_docs_input(raw_text: &str) -> ParsedSource {
             detail: "Detected code-fenced curl example inside docs".to_string(),
             confidence: Confidence::High,
         });
-        let key = draft_key(&candidate);
-        seen.insert(key, candidates.len());
         candidates.push(candidate);
     }
-
-    let base_url = BASE_URL_RE.find(raw_text).map(|item| {
-        let raw = item.as_str();
-        match url::Url::parse(raw) {
-            Ok(url) => format!(
-                "{}://{}{}",
-                url.scheme(),
-                url.host_str().unwrap_or_default(),
-                url.port()
-                    .map(|port| format!(":{port}"))
-                    .unwrap_or_default()
-            ),
-            Err(_) => raw.to_string(),
-        }
-    });
 
     let body_example = JSON_BLOCK_RE
         .captures(raw_text)
@@ -82,7 +65,10 @@ pub fn parse_docs_input(raw_text: &str) -> ParsedSource {
     for captures in METHOD_PATH_RE.captures_iter(raw_text) {
         let method = captures.get(1).map(|item| item.as_str()).unwrap_or("GET");
         let raw_target = captures.get(2).map(|item| item.as_str()).unwrap_or("/");
-        let (candidate_base_url, path, query) = parse_target(raw_target, base_url.clone());
+        let method_start = captures.get(0).map_or(0, |item| item.start());
+        let preceding_base_url = nearest_preceding_base_url(raw_text, method_start);
+        let (candidate_base_url, path, query) =
+            parse_target(raw_target, preceding_base_url.clone());
         let path = normalize_path_template(&path);
         let mut slots = infer_slots(&path, &query, body_example.as_deref());
         let mut auth = infer_auth_style(raw_text, &mut slots);
@@ -122,24 +108,14 @@ pub fn parse_docs_input(raw_text: &str) -> ParsedSource {
             source_kinds: vec![SourceKind::Docs],
         };
 
-        let key = draft_key(&draft);
-        if let Some(index) = seen.get(&key).copied() {
-            candidates[index].evidence.push(EvidenceItem {
-                source_kind: SourceKind::Docs,
-                label: "docs prose confirmation".to_string(),
-                detail: format!("Prose also referenced `{}`", draft.endpoint_summary()),
-                confidence: Confidence::Medium,
-            });
-            continue;
-        }
-
-        if draft.base_url.is_none() && base_url.is_none() {
+        if draft.base_url.is_none() && preceding_base_url.is_none() {
             draft.confidence.overall = Confidence::Low;
             draft.confidence.notes = "Method/path found but base URL was not explicit".to_string();
         }
-        seen.insert(key, candidates.len());
         candidates.push(draft);
     }
+
+    let candidates = dedupe_docs_candidates(candidates);
 
     if candidates.is_empty() {
         notes.push("Docs were too unclear to build a sensible request".to_string());
@@ -149,6 +125,27 @@ pub fn parse_docs_input(raw_text: &str) -> ParsedSource {
         source,
         candidates,
         notes,
+    }
+}
+
+fn nearest_preceding_base_url(raw_text: &str, before: usize) -> Option<String> {
+    BASE_URL_RE
+        .find_iter(raw_text.get(..before).unwrap_or_default())
+        .last()
+        .map(|item| canonical_base_url(item.as_str()))
+}
+
+fn canonical_base_url(raw: &str) -> String {
+    match url::Url::parse(raw) {
+        Ok(url) => format!(
+            "{}://{}{}",
+            url.scheme(),
+            url.host_str().unwrap_or_default(),
+            url.port()
+                .map(|port| format!(":{port}"))
+                .unwrap_or_default()
+        ),
+        Err(_) => raw.to_string(),
     }
 }
 
@@ -404,8 +401,40 @@ fn normalize_path_template(path: &str) -> String {
     normalized
 }
 
-fn draft_key(draft: &RequestDraft) -> String {
-    format!("{} {}", draft.method, draft.path)
+fn dedupe_docs_candidates(candidates: Vec<RequestDraft>) -> Vec<RequestDraft> {
+    let keys = endpoint_merge_keys(&candidates);
+    let mut seen = BTreeMap::<_, usize>::new();
+    let mut deduped = Vec::<RequestDraft>::new();
+
+    for (candidate, key) in candidates.into_iter().zip(keys) {
+        if let Some(index) = seen.get(&key).copied() {
+            let endpoint = candidate.endpoint_summary();
+            let existing = &mut deduped[index];
+            if !has_known_origin(existing.base_url.as_deref())
+                && has_known_origin(candidate.base_url.as_deref())
+            {
+                existing.base_url = candidate.base_url.clone();
+            }
+            existing.evidence.push(EvidenceItem {
+                source_kind: SourceKind::Docs,
+                label: "docs prose confirmation".to_string(),
+                detail: format!("Docs also referenced `{endpoint}`"),
+                confidence: Confidence::Medium,
+            });
+        } else {
+            seen.insert(key, deduped.len());
+            deduped.push(candidate);
+        }
+    }
+    deduped
+}
+
+fn has_known_origin(base_url: Option<&str>) -> bool {
+    base_url
+        .and_then(|value| url::Url::parse(value.trim()).ok())
+        .filter(|url| url.query().is_none() && url.fragment().is_none())
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some()
 }
 
 fn dedupe_slots(slots: &mut Vec<RuntimeSlot>) {
@@ -455,5 +484,50 @@ Use Bearer token authentication.
         assert_eq!(draft.base_url.as_deref(), Some("https://api.example.com"));
         assert_eq!(draft.path, "/v1/customers/{{customer_id}}");
         assert!(matches!(draft.auth, AuthStyle::Bearer { .. }));
+    }
+
+    #[test]
+    fn same_method_and_path_on_different_origins_are_not_deduplicated() {
+        let docs = r#"
+GET https://one.example.com/v1/users
+GET https://two.example.com/v1/users
+"#;
+
+        let parsed = parse_docs_input(docs);
+
+        assert_eq!(parsed.candidates.len(), 2);
+        assert_eq!(
+            parsed.candidates[0].base_url.as_deref(),
+            Some("https://one.example.com")
+        );
+        assert_eq!(
+            parsed.candidates[1].base_url.as_deref(),
+            Some("https://two.example.com")
+        );
+    }
+
+    #[test]
+    fn relative_targets_use_the_nearest_preceding_section_base_url() {
+        let docs = r#"
+## Region A
+Base URL: https://a.example.com/v1
+GET /users
+
+## Region B
+Base URL: https://b.example.com/v2
+GET /users
+"#;
+
+        let parsed = parse_docs_input(docs);
+
+        assert_eq!(parsed.candidates.len(), 2);
+        assert_eq!(
+            parsed.candidates[0].base_url.as_deref(),
+            Some("https://a.example.com")
+        );
+        assert_eq!(
+            parsed.candidates[1].base_url.as_deref(),
+            Some("https://b.example.com")
+        );
     }
 }

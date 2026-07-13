@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::exec::redact::sanitize_response_schema;
 use crate::model::{
     AppSettings, AttemptListItem, Blocker, Outcome, Recipe, RecipeListItem, RequestAttempt,
 };
@@ -102,7 +103,7 @@ impl AppRepository {
     }
 
     pub fn insert_recipe(&self, recipe: &Recipe) -> Result<i64> {
-        let payload = serde_json::to_string(recipe)?;
+        let payload = safe_recipe_payload(recipe)?;
         self.connection.execute(
             "INSERT INTO recipes(name, method, url_template, last_success_at, last_success_status, payload_json)
              VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
@@ -120,9 +121,10 @@ impl AppRepository {
 
     pub fn update_recipe_verification(&self, id: i64, verified_recipe: &Recipe) -> Result<()> {
         // This persists verification metadata and the serialized recipe payload only.
-        // It does not redact secrets; callers must pass an already-safe/redacted recipe.
+        // Response schema annotations are sanitized defensively, but request fields are not;
+        // callers must still pass an already-safe/redacted recipe.
         // Errors must not include recipe payloads, body contents, resolved secret URLs, or secret values.
-        let payload = serde_json::to_string(verified_recipe)?;
+        let payload = safe_recipe_payload(verified_recipe)?;
         let updated = self.connection.execute(
             "UPDATE recipes
              SET last_success_at = ?1, last_success_status = ?2, payload_json = ?3
@@ -178,6 +180,15 @@ impl AppRepository {
     }
 }
 
+fn safe_recipe_payload(recipe: &Recipe) -> Result<String> {
+    let mut safe = recipe.clone();
+    safe.response_schema = recipe
+        .response_schema
+        .as_ref()
+        .map(sanitize_response_schema);
+    serde_json::to_string(&safe).map_err(anyhow::Error::from)
+}
+
 fn endpoint_from_attempt(attempt: &RequestAttempt) -> String {
     attempt.rendered_request_redacted.url.clone()
 }
@@ -211,11 +222,12 @@ fn parse_blocker(value: &str) -> Blocker {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Utc};
+    use serde_json::json;
     use tempfile::tempdir;
 
     use crate::model::{
         AuthStyle, BodyTemplate, Confidence, FieldConfidence, Recipe, RequestAttempt, RequestDraft,
-        ResponseSnapshot, SourceInput, SourceKind,
+        ResponseSnapshot, SchemaSpec, SourceInput, SourceKind,
     };
     use crate::store::db::{AppPaths, open_database};
 
@@ -268,6 +280,8 @@ mod tests {
                 status: Some(200),
                 headers: Vec::new(),
                 body_preview: "{}".to_string(),
+                body_truncated: false,
+                bytes_read: 2,
                 elapsed_ms: 5,
                 validation_errors: Vec::new(),
                 transport_error: None,
@@ -331,6 +345,37 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_recipe_round_trip_preserves_sanitized_response_schema() {
+        let root = tempdir().expect("tempdir");
+        let paths = AppPaths::from_root(&root.path().join("data"), &root.path().join("config"))
+            .expect("paths");
+        let repo = AppRepository::new(open_database(&paths).expect("db"));
+        let mut recipe = test_recipe("GET", "https://api.example.com/users", None);
+        recipe.response_schema = Some(SchemaSpec {
+            name: Some("response".to_string()),
+            schema: json!({
+                "type": "object",
+                "default": { "token": "raw_default_secret" },
+                "properties": {
+                    "token": { "type": "string", "enum": ["raw_enum_secret"] },
+                    "id": { "type": "string" }
+                }
+            }),
+        });
+
+        let id = repo.insert_recipe(&recipe).expect("insert recipe");
+        let fetched = repo
+            .get_recipe(id)
+            .expect("fetch recipe")
+            .expect("recipe exists");
+        let schema = fetched.response_schema.expect("response schema");
+
+        assert!(schema.schema.get("default").is_none());
+        assert!(schema.schema["properties"]["token"].get("enum").is_none());
+        assert_eq!(schema.schema["properties"]["id"]["type"], "string");
+    }
+
+    #[test]
     fn updating_missing_recipe_returns_error_without_creating_recipe_or_leaking_payload() {
         const RAW_SECRET: &str = "repo_update_raw_secret_marker";
 
@@ -369,6 +414,7 @@ mod tests {
             body_template: BodyTemplate::None,
             auth_style: AuthStyle::None,
             slots: Vec::new(),
+            response_schema: None,
             last_success_at,
             last_success_status: last_success_at.map(|_| 200),
         }

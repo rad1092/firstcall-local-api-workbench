@@ -5,7 +5,9 @@ use anyhow::{Context, Result, bail};
 
 use crate::model::Recipe;
 
-use super::agent_common::{has_successful_verification, sanitize_url_template_for_agent};
+use super::agent_common::{
+    has_successful_verification, parse_agent_url_template, sanitize_url_template_for_agent,
+};
 use super::agent_yaml::recipe_to_agent_yaml;
 use super::mcp_ts::write_mcp_server_package;
 use super::package_manifest::write_package_manifest;
@@ -25,6 +27,7 @@ pub fn export_agent_package(recipe: &Recipe, out_dir: &Path) -> Result<()> {
     if !is_agent_export_eligible(recipe) {
         bail!("Recipe is not eligible for agent export because it has no successful verification");
     }
+    parse_agent_url_template(&recipe.url_template)?;
     fs::create_dir_all(out_dir)
         .with_context(|| format!("Could not create output directory {}", out_dir.display()))?;
     fs::write(out_dir.join("recipe.yaml"), recipe_to_agent_yaml(recipe)?)?;

@@ -6,15 +6,16 @@ use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde_json::{Map, Value};
 
+use crate::exec::redact::sanitize_response_schema;
 use crate::model::{
     AuthStyle, BodyTemplate, Confidence, HeaderField, KeyValueField, Recipe, RuntimeSlot,
-    SlotLocation,
+    SchemaSpec, SlotLocation,
 };
 use crate::store::db::{AppPaths, open_database};
 use crate::store::repos::AppRepository;
 
 use super::agent_package::sanitized_agent_url_template;
-use super::package_inspect::{PackageInspectReport, inspect_agent_package_dir};
+use super::package_inspect::{PackageInspectReport, inspect_agent_package_for_import};
 
 #[derive(Clone, Debug)]
 pub struct PackageImportReport {
@@ -48,7 +49,7 @@ impl PackageImportReport {
 }
 
 pub fn import_agent_package_dir(path: &Path, paths: &AppPaths) -> Result<PackageImportReport> {
-    let inspect_report = inspect_agent_package_dir(path);
+    let (inspect_report, recipe_snapshot) = inspect_agent_package_for_import(path);
     if !inspect_report.is_ready() {
         return Ok(blocked_report(
             path,
@@ -57,7 +58,11 @@ pub fn import_agent_package_dir(path: &Path, paths: &AppPaths) -> Result<Package
         ));
     }
 
-    let recipe = match recipe_from_agent_package_dir(path) {
+    let recipe = match recipe_snapshot
+        .as_ref()
+        .context("validated recipe snapshot is unavailable")
+        .and_then(recipe_from_agent_recipe_yaml)
+    {
         Ok(recipe) => recipe,
         Err(error) => {
             return Ok(blocked_report(
@@ -133,10 +138,23 @@ fn recipe_from_agent_recipe_yaml(value: &Value) -> Result<Recipe> {
         ),
         auth_style,
         slots,
+        response_schema: response_schema(value)?,
         last_success_at: None,
         last_success_status: None,
     };
     Ok(recipe)
+}
+
+fn response_schema(value: &Value) -> Result<Option<SchemaSpec>> {
+    let Some(schema) = value.get("response_schema") else {
+        return Ok(None);
+    };
+    if schema.is_null() {
+        return Ok(None);
+    }
+    let schema: SchemaSpec = serde_json::from_value(schema.clone())
+        .context("recipe.yaml response_schema must match the supported schema shape")?;
+    Ok(Some(sanitize_response_schema(&schema)))
 }
 
 fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
@@ -368,4 +386,37 @@ fn agent_placeholder_names(text: &str) -> Vec<String> {
         .filter_map(|captures| captures.get(1).map(|capture| capture.as_str().to_string()))
         .filter(|name| !name.starts_with("FIRSTCALL_"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::recipe_from_agent_recipe_yaml;
+    use crate::export::package_inspect::inspect_agent_package_for_import;
+
+    #[test]
+    fn inspected_recipe_snapshot_remains_the_conversion_source() {
+        let package = tempdir().expect("package tempdir");
+        fs::write(
+            package.path().join("recipe.yaml"),
+            "name: snapshot-name\nmethod: GET\nurl_template: https://api.example.com/users\nauth:\n  type: none\n",
+        )
+        .expect("write recipe");
+
+        let (_report, snapshot) = inspect_agent_package_for_import(package.path());
+        fs::write(
+            package.path().join("recipe.yaml"),
+            "name: changed-after-inspect\nmethod: DELETE\nurl_template: https://evil.example/users\nauth:\n  type: none\n",
+        )
+        .expect("replace recipe after inspect");
+
+        let recipe = recipe_from_agent_recipe_yaml(snapshot.as_ref().expect("recipe snapshot"))
+            .expect("convert snapshot");
+        assert_eq!(recipe.name, "snapshot-name");
+        assert_eq!(recipe.method, "GET");
+        assert_eq!(recipe.url_template, "https://api.example.com/users");
+    }
 }

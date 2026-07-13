@@ -25,6 +25,10 @@ pub fn classify_outcome(
         return (Outcome::Failure, Some(Blocker::UnknownFailure));
     }
 
+    if response.body_truncated {
+        return (Outcome::Failure, Some(Blocker::ResourceLimitExceeded));
+    }
+
     if let Some(status) = response.status {
         if status == 401 || status == 403 || looks_like_auth_error(&response.body_preview) {
             return (Outcome::Failure, Some(Blocker::AuthBlocked));
@@ -112,6 +116,8 @@ mod tests {
             status: Some(200),
             headers: Vec::new(),
             body_preview: "{}".to_string(),
+            body_truncated: false,
+            bytes_read: 2,
             elapsed_ms: 3,
             validation_errors: vec!["missing id".to_string()],
             transport_error: None,
@@ -120,5 +126,23 @@ mod tests {
             classify_outcome(None, Some(&response), None, &AppSettings::default());
         assert_eq!(outcome, crate::model::Outcome::Partial);
         assert_eq!(blocker, Some(Blocker::SchemaMismatch));
+    }
+
+    #[test]
+    fn classifies_truncated_response_as_resource_limit_failure() {
+        let response = ResponseSnapshot {
+            status: Some(200),
+            headers: Vec::new(),
+            body_preview: "partial".to_string(),
+            body_truncated: true,
+            bytes_read: 1_048_576,
+            elapsed_ms: 3,
+            validation_errors: vec!["response body exceeded hard limit".to_string()],
+            transport_error: None,
+        };
+        let (outcome, blocker) =
+            classify_outcome(None, Some(&response), None, &AppSettings::default());
+        assert_eq!(outcome, crate::model::Outcome::Failure);
+        assert_eq!(blocker, Some(Blocker::ResourceLimitExceeded));
     }
 }

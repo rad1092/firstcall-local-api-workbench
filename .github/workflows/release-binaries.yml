@@ -7,21 +7,127 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and upload assets for, for example v0.1.0"
+        description: "Existing release tag to build and publish, for example v0.2.2"
         required: true
         type: string
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
+  preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_sha: ${{ steps.release.outputs.release_sha }}
+
+    steps:
+      - name: Validate release tag syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must match vMAJOR.MINOR.PATCH: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Check out release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag commit and package version
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"
+          tag_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "$tag_commit" != "$head_commit" ]]; then
+            echo "Checked-out commit $head_commit does not match tag commit $tag_commit" >&2
+            exit 1
+          fi
+          echo "release_sha=$tag_commit" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import os
+          import tomllib
+
+          with open("Cargo.toml", "rb") as handle:
+              package_version = tomllib.load(handle)["package"]["version"]
+
+          release_tag = os.environ["RELEASE_TAG"]
+          expected_tag = f"v{package_version}"
+          if release_tag != expected_tag:
+              raise SystemExit(
+                  f"release tag {release_tag!r} does not match Cargo package version {expected_tag!r}"
+              )
+          PY
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (2026-06-30)
+        with:
+          toolchain: 1.96.1
+          components: clippy,rustfmt
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install cargo-audit
+        # cargo-audit 0.22.2's published lock contains newly-advised transitive
+        # versions. Keep the tool version fixed but temporarily re-resolve its
+        # compatible tree until a release ships a safe lock.
+        run: cargo install cargo-audit --version 0.22.2 --root "$RUNNER_TEMP/cargo-audit"
+
+      - name: Audit locked dependencies
+        run: '"$RUNNER_TEMP/cargo-audit/bin/cargo-audit" audit --deny unsound --deny yanked'
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libudev-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libxrandr-dev
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
   build:
     name: Build ${{ matrix.target }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -41,15 +147,18 @@ jobs:
 
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          ref: ${{ needs.preflight.outputs.release_sha }}
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable (2026-06-30)
+        with:
+          toolchain: 1.96.1
 
       - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
@@ -82,6 +191,7 @@ jobs:
           & "target/release/firstcall-cli$exe" version
 
       - name: Package binaries
+        id: package
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -118,10 +228,12 @@ jobs:
             tar -C "dist" -czf $asset $packageName
           }
 
-          "ASSET_PATH=$asset" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "asset_path=$asset" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Check packaged archive
         shell: pwsh
+        env:
+          ASSET_PATH: ${{ steps.package.outputs.asset_path }}
         run: |
           $ErrorActionPreference = "Stop"
           $checkRoot = Join-Path "dist" "archive-check"
@@ -143,20 +255,69 @@ jobs:
           & $cli.FullName --help
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: firstcall-${{ env.RELEASE_TAG }}-${{ matrix.target }}
-          path: ${{ env.ASSET_PATH }}
+          path: ${{ steps.package.outputs.asset_path }}
           if-no-files-found: error
+
+  attest:
+    name: Attest release archives
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - build
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download binary artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: attest-assets
+          merge-multiple: true
+
+      - name: Attest binary archives
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: attest-assets/firstcall-*
 
   publish:
     name: Publish release assets
     runs-on: ubuntu-latest
-    needs: build
+    needs:
+      - preflight
+      - build
+      - attest
+    environment: release
+    permissions:
+      contents: write
 
     steps:
+      - name: Check out the preflight commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.preflight.outputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Recheck release tag immutability
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.preflight.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          tag_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+          if [[ "$tag_commit" != "$RELEASE_SHA" ]]; then
+            echo "Release tag moved from $RELEASE_SHA to $tag_commit during the workflow." >&2
+            exit 1
+          fi
+
       - name: Download binary artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: release-assets
           merge-multiple: true
@@ -176,23 +337,40 @@ jobs:
           - `firstcall` for the desktop GUI workbench.
           - `firstcall-cli version` for the automation CLI.
 
+          Verify build provenance with:
+
+          `gh attestation verify <downloaded-archive> --repo rad1092/firstcall-local-api-workbench`
+
           CLI verification remains environment-first. Do not put real secrets in
           command history, scripts, or exported artifacts.
           EOF
 
-      - name: Create release if needed and upload assets
+      - name: Create draft, upload assets, and publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="${RELEASE_TAG}"
+          tag="$RELEASE_TAG"
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag already exists; uploading deterministic assets."
-          else
-            gh release create "$tag" --title "FirstCall $tag" --notes-file release-notes.md
+            echo "Release $tag already exists; refusing to replace published assets." >&2
+            exit 1
           fi
 
-          gh release upload "$tag" release-assets/* --clobber
+          gh release create "$tag" \
+            --verify-tag \
+            --draft \
+            --title "FirstCall $tag" \
+            --notes-file release-notes.md
+          gh release upload "$tag" release-assets/*
+
+          local_count="$(find release-assets -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          remote_count="$(gh release view "$tag" --json assets --jq '.assets | length')"
+          if [[ "$local_count" != "$remote_count" ]]; then
+            echo "Draft release has $remote_count assets; expected $local_count." >&2
+            exit 1
+          fi
+
+          gh release edit "$tag" --draft=false

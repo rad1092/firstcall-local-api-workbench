@@ -18,6 +18,7 @@ const EXPECTED_MANIFEST_FILES: &[&str] = &[
     "skill.md",
     "policy.json",
     "mcp-server/package.json",
+    "mcp-server/package-lock.json",
     "mcp-server/tsconfig.json",
     "mcp-server/src/server.ts",
     "mcp-server/README.md",
@@ -53,6 +54,19 @@ fn validate_package_fixture_success() {
             .iter()
             .any(|check| check.contains("structuredContent"))
     );
+    for dependency in [
+        "@modelcontextprotocol/sdk",
+        "ajv",
+        "zod",
+        "typescript",
+        "@types/node",
+    ] {
+        assert!(
+            report.checks_passed.iter().any(|check| check
+                == &format!("package lock direct dependency version matches: {dependency}")),
+            "missing direct dependency lock check for {dependency}"
+        );
+    }
 }
 
 #[test]
@@ -134,6 +148,8 @@ fn validate_package_mcp_compile_smoke_not_requested_by_default() {
 #[test]
 fn cli_validate_package_mcp_compile_smoke_missing_node_modules_warns_without_installing() {
     let package = generate_package();
+    let lock_before = fs::read(package.path().join("mcp-server/package-lock.json"))
+        .expect("generated package lock");
     let output = validate_command()
         .args(["validate-package", "--dir"])
         .arg(package.path())
@@ -149,9 +165,10 @@ fn cli_validate_package_mcp_compile_smoke_missing_node_modules_warns_without_ins
         !package.path().join("mcp-server/node_modules").exists(),
         "validate-package must not install node_modules"
     );
-    assert!(
-        !package.path().join("mcp-server/package-lock.json").exists(),
-        "validate-package must not run npm install"
+    assert_eq!(
+        fs::read(package.path().join("mcp-server/package-lock.json")).expect("package lock"),
+        lock_before,
+        "validate-package must not modify the dependency lock"
     );
     assert!(!combined.contains(RAW_SECRET));
 }
@@ -159,6 +176,8 @@ fn cli_validate_package_mcp_compile_smoke_missing_node_modules_warns_without_ins
 #[test]
 fn cli_validate_package_mcp_compile_smoke_missing_local_tsc_warns_without_global_tools() {
     let package = generate_package();
+    let lock_before = fs::read(package.path().join("mcp-server/package-lock.json"))
+        .expect("generated package lock");
     fs::create_dir_all(package.path().join("mcp-server/node_modules/.bin"))
         .expect("node_modules bin");
 
@@ -173,9 +192,10 @@ fn cli_validate_package_mcp_compile_smoke_missing_local_tsc_warns_without_global
     assert!(output.status.success(), "{combined}");
     assert!(combined.contains("MCP compile smoke: warning"));
     assert!(combined.contains("local TypeScript compiler was not found"));
-    assert!(
-        !package.path().join("mcp-server/package-lock.json").exists(),
-        "validate-package must not run npm install"
+    assert_eq!(
+        fs::read(package.path().join("mcp-server/package-lock.json")).expect("package lock"),
+        lock_before,
+        "validate-package must not modify the dependency lock"
     );
     assert!(!combined.contains(RAW_SECRET));
 }
@@ -303,6 +323,68 @@ fn validate_package_missing_manifest_warns_but_does_not_fail() {
 }
 
 #[test]
+fn validate_legacy_manifest_without_npm_lock_warns_but_remains_readable() {
+    let package = generate_package();
+    edit_json_file(package.path(), "policy.json", |policy| {
+        policy["schema_version"] = json!(1);
+    });
+    edit_json_file(package.path(), "mcp-server/package.json", |package| {
+        package
+            .as_object_mut()
+            .expect("package object")
+            .remove("packageManager");
+    });
+    fs::remove_file(package.path().join("mcp-server/package-lock.json"))
+        .expect("remove package lock");
+    let manifest_path = package.path().join("package.manifest.json");
+    let mut manifest = read_json(&manifest_path);
+    manifest["files"]
+        .as_array_mut()
+        .expect("manifest files")
+        .retain(|entry| entry["path"] != "mcp-server/package-lock.json");
+    write_json(&manifest_path, &manifest);
+
+    let report = validate_agent_package_dir(package.path());
+
+    assert!(report.is_valid(), "errors: {:?}", report.errors);
+    assert!(report.warnings.iter().any(|warning| {
+        warning.contains("legacy package is missing mcp-server/package-lock.json")
+    }));
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("has no packageManager pin"))
+    );
+}
+
+#[test]
+fn policy_v2_missing_lock_and_manifest_entry_is_invalid() {
+    let package = generate_package();
+    fs::remove_file(package.path().join("mcp-server/package-lock.json"))
+        .expect("remove package lock");
+    let manifest_path = package.path().join("package.manifest.json");
+    let mut manifest = read_json(&manifest_path);
+    manifest["files"]
+        .as_array_mut()
+        .expect("manifest files")
+        .retain(|entry| entry["path"] != "mcp-server/package-lock.json");
+    write_json(&manifest_path, &manifest);
+
+    let report = validate_agent_package_dir(package.path());
+
+    assert!(!report.is_valid());
+    assert!(
+        report.errors.iter().any(|error| {
+            error.contains("policy schema v2 requires mcp-server/package-lock.json")
+        })
+    );
+    assert!(report.errors.iter().any(|error| {
+        error.contains("manifest missing expected file: mcp-server/package-lock.json")
+    }));
+}
+
+#[test]
 fn validate_package_missing_required_file_fails() {
     let package = generate_package();
     fs::remove_file(package.path().join("recipe.yaml")).expect("remove recipe");
@@ -327,6 +409,75 @@ fn validate_package_hash_mismatch_fails_without_echoing_secret() {
     assert!(!report.is_valid());
     assert!(errors.contains("manifest hash mismatch: skill.md"));
     assert!(!errors.contains(RAW_SECRET));
+}
+
+#[test]
+fn validate_package_lock_drift_fails_even_with_refreshed_manifest() {
+    let package = generate_package();
+    edit_json_file(package.path(), "mcp-server/package-lock.json", |lock| {
+        lock["packages"][""]["dependencies"]["@modelcontextprotocol/sdk"] = json!("9.9.9");
+    });
+
+    let report = validate_agent_package_dir(package.path());
+
+    assert!(!report.is_valid());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("packages[''].dependencies"))
+    );
+}
+
+#[test]
+fn validate_package_lock_requires_every_direct_dependency_entry() {
+    let package = generate_package();
+    edit_json_file(package.path(), "mcp-server/package-lock.json", |lock| {
+        lock["packages"]
+            .as_object_mut()
+            .expect("packages")
+            .remove("node_modules/zod");
+    });
+
+    let report = validate_agent_package_dir(package.path());
+
+    assert!(!report.is_valid());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| { error.contains("missing direct dependency entry: node_modules/zod") })
+    );
+}
+
+#[test]
+fn validate_package_lock_direct_dependency_version_must_match_package_json() {
+    let package = generate_package();
+    edit_json_file(package.path(), "mcp-server/package-lock.json", |lock| {
+        lock["packages"]["node_modules/typescript"]["version"] = json!("0.0.0");
+    });
+
+    let report = validate_agent_package_dir(package.path());
+
+    assert!(!report.is_valid());
+    assert!(report.errors.iter().any(|error| {
+        error.contains("direct dependency version must match package.json: typescript")
+    }));
+}
+
+#[test]
+fn validate_package_lock_integrity_must_be_base64_sha512() {
+    let package = generate_package();
+    edit_json_file(package.path(), "mcp-server/package-lock.json", |lock| {
+        lock["packages"]["node_modules/zod"]["integrity"] = json!("sha512-not-base64!!!");
+    });
+
+    let report = validate_agent_package_dir(package.path());
+
+    assert!(!report.is_valid());
+    assert!(report.errors.iter().any(|error| {
+        error.contains("pin version, registry URL, and integrity: node_modules/zod")
+    }));
 }
 
 #[test]
@@ -509,6 +660,31 @@ fn validate_package_missing_mcp_tool_annotations_marker_fails() {
 }
 
 #[test]
+fn validate_package_rejects_global_fetch_or_proxy_environment_access() {
+    for forbidden in [
+        "fetch(\"https://example.invalid\")",
+        "process.env.HTTP_PROXY",
+    ] {
+        let package = generate_package();
+        let server_path = package.path().join("mcp-server/src/server.ts");
+        let mut server = fs::read_to_string(&server_path).expect("read server");
+        server.push_str(&format!("\nvoid {forbidden};\n"));
+        fs::write(&server_path, server).expect("tamper server");
+
+        let report = validate_agent_package_dir(package.path());
+        let marker = if forbidden.starts_with("fetch(") {
+            "fetch("
+        } else {
+            forbidden
+        };
+        assert!(!report.is_valid());
+        assert!(report.errors.iter().any(|error| {
+            error.contains("forbidden proxy-capable marker") && error.contains(marker)
+        }));
+    }
+}
+
+#[test]
 fn cli_validate_package_raw_secret_does_not_print_secret_value() {
     let package = generate_package();
     fs::write(
@@ -573,6 +749,55 @@ fn validate_package_mutating_policy_guard() {
     );
 }
 
+#[test]
+fn validate_policy_v2_requires_timeout_dns_pinning_direct_proxy_and_routing_header_blocks() {
+    let package = generate_package();
+    edit_json_file(package.path(), "policy.json", |policy| {
+        policy["timeout_ms"] = json!(29_999);
+        policy["dns_policy"]["pin_connection"] = json!(false);
+        policy["dns_policy"]["blocked_address_classes"] = json!(["unspecified", "link_local"]);
+        policy["proxy_policy"]["mode"] = json!("environment");
+        policy["blocked_headers"]
+            .as_array_mut()
+            .expect("blocked headers")
+            .retain(|header| header != "X-Original-URL");
+    });
+
+    let report = validate_agent_package_dir(package.path());
+
+    assert!(!report.is_valid());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("timeout_ms must be 30000"))
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("dns_policy.pin_connection must be true"))
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("must block DNS address class: multicast"))
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("proxy_policy must use mode direct"))
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("must block header: X-Original-URL"))
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn validate_package_symlink_required_file_fails() {
@@ -619,6 +844,24 @@ fn read_json(path: &std::path::Path) -> Value {
 
 fn write_json(path: &std::path::Path, value: &Value) {
     fs::write(path, serde_json::to_string_pretty(value).expect("json")).expect("write json");
+}
+
+fn edit_json_file(root: &std::path::Path, relative: &str, edit: impl FnOnce(&mut Value)) {
+    let path = root.join(relative);
+    let mut value = read_json(&path);
+    edit(&mut value);
+    write_json(&path, &value);
+
+    let manifest_path = root.join("package.manifest.json");
+    let mut manifest = read_json(&manifest_path);
+    let entry = manifest["files"]
+        .as_array_mut()
+        .expect("manifest files")
+        .iter_mut()
+        .find(|entry| entry["path"] == relative)
+        .expect("manifest entry");
+    entry["sha256"] = json!(sha256_file(&path));
+    write_json(&manifest_path, &manifest);
 }
 
 fn is_sha256_hex(value: &str) -> bool {

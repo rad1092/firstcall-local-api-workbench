@@ -19,6 +19,19 @@ impl FirstCallApp {
                 );
             });
             ui.horizontal(|ui| {
+                ui.label("Response body hard limit (bytes)");
+                ui.add(
+                    egui::DragValue::new(&mut self.settings.response_body_limit_bytes)
+                        .range(1024..=16_777_216),
+                );
+            });
+            if self.settings.response_preview_limit_bytes
+                > self.settings.response_body_limit_bytes
+            {
+                self.settings.response_preview_limit_bytes =
+                    self.settings.response_body_limit_bytes;
+            }
+            ui.horizontal(|ui| {
                 ui.label("Success status min");
                 ui.add(
                     egui::DragValue::new(&mut self.settings.success_status_min).range(100..=599),

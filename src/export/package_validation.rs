@@ -3,13 +3,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use base64::Engine;
 use chrono::DateTime;
 use regex::Regex;
 use serde_json::Value;
 
 use super::agent_common::{GENERATOR, looks_destructive_path};
-use super::package_manifest::{MANIFEST_FILE, MANIFESTED_FILES, sha256_file_hex};
-use crate::exec::redact::redact_free_text;
+use super::package_manifest::{
+    LEGACY_MANIFESTED_FILES, MANIFEST_FILE, MANIFESTED_FILES, sha256_file_hex,
+};
+use crate::exec::redact::{redact_free_text, sanitize_response_schema};
+use crate::model::SchemaSpec;
 
 const REQUIRED_DIRS: &[&str] = &["mcp-server", "mcp-server/src"];
 
@@ -132,6 +136,7 @@ pub fn validate_agent_package_dir_with_options(
     validate_policy(path, &mut report);
     validate_mcp_server(path, &mut report);
     validate_package_json(path, &mut report);
+    validate_package_lock(path, &mut report);
     validate_tsconfig_json(path, &mut report);
     validate_package_manifest(path, &mut report);
     if options.mcp_compile_smoke {
@@ -186,7 +191,7 @@ fn validate_required_layout(root: &Path, report: &mut PackageValidationReport) {
         }
     }
 
-    for relative in MANIFESTED_FILES {
+    for relative in LEGACY_MANIFESTED_FILES {
         let path = root.join(relative);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -205,6 +210,26 @@ fn validate_required_layout(root: &Path, report: &mut PackageValidationReport) {
                 report.error(format!("missing required file: {relative}"));
             }
         }
+    }
+
+    let lock_relative = "mcp-server/package-lock.json";
+    let lock_path = root.join(lock_relative);
+    match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            report.error(format!("required file is a symlink: {lock_relative}"));
+        }
+        Ok(metadata) if metadata.is_file() => {
+            report.pass(format!("reproducibility lock exists: {lock_relative}"));
+        }
+        Ok(_) => report.error(format!(
+            "reproducibility lock has unsupported type: {lock_relative}"
+        )),
+        Err(_) if policy_schema_version(root) == Some(2) => report.error(
+            "policy schema v2 requires mcp-server/package-lock.json for a reproducible runtime",
+        ),
+        Err(_) => report.warn(
+            "legacy package is missing mcp-server/package-lock.json; dependency tree is not reproducible",
+        ),
     }
 }
 
@@ -225,7 +250,13 @@ fn validate_extra_entries(root: &Path, report: &mut PackageValidationReport) {
     warn_extra_entries(
         root,
         "mcp-server",
-        &["package.json", "tsconfig.json", "README.md", "src"],
+        &[
+            "package.json",
+            "package-lock.json",
+            "tsconfig.json",
+            "README.md",
+            "src",
+        ],
         report,
     );
     warn_extra_entries(root, "mcp-server/src", &["server.ts"], report);
@@ -297,8 +328,25 @@ fn validate_recipe_yaml(root: &Path, report: &mut PackageValidationReport) {
     validate_recipe_url_template(&value, report);
     validate_recipe_verified(&value, report);
     validate_recipe_security(&value, report);
+    validate_recipe_response_schema(&value, report);
     validate_recipe_executable_redaction(&value, report);
     scan_structured_secretish_values(report, "recipe.yaml", &value);
+}
+
+fn validate_recipe_response_schema(value: &Value, report: &mut PackageValidationReport) {
+    let Some(raw_schema) = value.get("response_schema") else {
+        report.pass("recipe.yaml has no response schema (status-only verification)");
+        return;
+    };
+    let Ok(schema) = serde_json::from_value::<SchemaSpec>(raw_schema.clone()) else {
+        report.error("recipe.yaml response_schema has an unsupported shape");
+        return;
+    };
+    if sanitize_response_schema(&schema) == schema {
+        report.pass("recipe.yaml response_schema is sanitized");
+    } else {
+        report.error("recipe.yaml response_schema contains unsafe annotations or exact secrets");
+    }
 }
 
 fn validate_recipe_auth(value: &Value, report: &mut PackageValidationReport) {
@@ -464,7 +512,14 @@ fn validate_policy(root: &Path, report: &mut PackageValidationReport) {
     };
     report.pass("policy.json parses as JSON");
 
-    check_u64_field(report, &value, "policy.json", "schema_version", 1);
+    let policy_version = value.get("schema_version").and_then(Value::as_u64);
+    match policy_version {
+        Some(2) => report.pass("policy.json schema_version is 2"),
+        Some(1) => report.warn(
+            "legacy policy.json schema_version 1 has no generated-runtime enforcement contract",
+        ),
+        _ => report.error("policy.json schema_version must be 1 or 2"),
+    }
     let methods = check_non_empty_string_array(report, &value, "policy.json", "allowed_methods");
     check_non_empty_string_array(report, &value, "policy.json", "allowed_hosts");
     let paths = check_non_empty_string_array(report, &value, "policy.json", "allowed_paths");
@@ -472,6 +527,138 @@ fn validate_policy(root: &Path, report: &mut PackageValidationReport) {
     let secret_query_keys = check_string_array(report, &value, "policy.json", "secret_query_keys");
     let redact_response_keys =
         check_string_array(report, &value, "policy.json", "redact_response_keys");
+
+    if policy_version == Some(2) {
+        check_non_empty_string_array(report, &value, "policy.json", "allowed_origins");
+        check_non_empty_string_array(report, &value, "policy.json", "allowed_path_templates");
+        match value.get("max_response_bytes").and_then(Value::as_u64) {
+            Some(1_048_576) => report.pass("policy.json max_response_bytes is 1048576"),
+            _ => report.error("policy.json max_response_bytes must be 1048576"),
+        }
+        match value.get("timeout_ms").and_then(Value::as_u64) {
+            Some(30_000) => report.pass("policy.json timeout_ms is 30000"),
+            _ => report.error("policy.json timeout_ms must be 30000"),
+        }
+        match value.get("redirect_policy") {
+            Some(redirect)
+                if redirect.get("mode").and_then(Value::as_str) == Some("none")
+                    && redirect.get("max_hops").and_then(Value::as_u64) == Some(0) =>
+            {
+                report.pass("policy.json disables redirects")
+            }
+            _ => report.error("policy.json redirect_policy must disable redirects"),
+        }
+        match value.get("dns_policy") {
+            Some(dns_policy) if dns_policy.is_object() => {
+                match dns_policy
+                    .get("resolve_all_addresses")
+                    .and_then(Value::as_bool)
+                {
+                    Some(true) => report.pass("policy.json resolves every DNS address"),
+                    _ => report.error("policy.json dns_policy.resolve_all_addresses must be true"),
+                }
+                match dns_policy.get("pin_connection").and_then(Value::as_bool) {
+                    Some(true) => report.pass("policy.json pins DNS connections"),
+                    _ => report.error("policy.json dns_policy.pin_connection must be true"),
+                }
+                for field in ["allow_loopback", "allow_private_networks"] {
+                    if dns_policy.get(field).and_then(Value::as_bool).is_some() {
+                        report.pass(format!("policy.json dns_policy.{field} is boolean"));
+                    } else {
+                        report.error(format!("policy.json dns_policy.{field} must be boolean"));
+                    }
+                }
+                let blocked_classes = dns_policy
+                    .get("blocked_address_classes")
+                    .and_then(Value::as_array);
+                match blocked_classes {
+                    Some(blocked_classes) => {
+                        if blocked_classes.len() == 3
+                            && blocked_classes.iter().all(|value| {
+                                matches!(
+                                    value.as_str(),
+                                    Some("unspecified" | "link_local" | "multicast")
+                                )
+                            })
+                        {
+                            report.pass(
+                                "policy.json DNS blocked address classes use the exact v2 set",
+                            );
+                        } else {
+                            report.error(
+                                "policy.json DNS blocked address classes must be the exact v2 set",
+                            );
+                        }
+                        for required in ["unspecified", "link_local", "multicast"] {
+                            if blocked_classes
+                                .iter()
+                                .any(|value| value.as_str() == Some(required))
+                            {
+                                report.pass(format!(
+                                    "policy.json blocks DNS address class: {required}"
+                                ));
+                            } else {
+                                report.error(format!(
+                                    "policy.json must block DNS address class: {required}"
+                                ));
+                            }
+                        }
+                    }
+                    None => report
+                        .error("policy.json dns_policy.blocked_address_classes must be an array"),
+                }
+            }
+            _ => report.error("policy.json dns_policy must be an object"),
+        }
+        match value.get("proxy_policy") {
+            Some(proxy_policy)
+                if proxy_policy.get("mode").and_then(Value::as_str) == Some("direct")
+                    && proxy_policy
+                        .get("environment_variables")
+                        .and_then(Value::as_str)
+                        == Some("ignore") =>
+            {
+                report.pass("policy.json requires direct connections and ignores proxy env")
+            }
+            _ => report.error(
+                "policy.json proxy_policy must use mode direct and ignore environment variables",
+            ),
+        }
+        let blocked_headers = check_string_array(report, &value, "policy.json", "blocked_headers");
+        if let Some(blocked_headers) = blocked_headers {
+            for required in [
+                "Host",
+                "Content-Length",
+                "Transfer-Encoding",
+                "Connection",
+                "Upgrade",
+                "Proxy-Authorization",
+                "Proxy-Connection",
+                "Keep-Alive",
+                "TE",
+                "Trailer",
+                "Cookie",
+                "Forwarded",
+                "X-Forwarded-Host",
+                "X-Forwarded-Proto",
+                "X-Forwarded-For",
+                "X-Original-URL",
+                "X-Rewrite-URL",
+                "X-HTTP-Method-Override",
+                "X-Method-Override",
+                "X-HTTP-Method",
+            ] {
+                if blocked_headers
+                    .iter()
+                    .any(|header| header.eq_ignore_ascii_case(required))
+                {
+                    report.pass(format!("policy.json blocks header: {required}"));
+                } else {
+                    report.error(format!("policy.json must block header: {required}"));
+                }
+            }
+        }
+    }
 
     let requires_confirmation = match value.get("requires_confirmation").and_then(Value::as_bool) {
         Some(value) => {
@@ -555,7 +742,8 @@ fn validate_mcp_server(root: &Path, report: &mut PackageValidationReport) {
         "StdioServerTransport",
         "server.registerTool",
         "ToolArgs",
-        "RequestInit",
+        "https.RequestOptions",
+        "directRequest",
         "setDefaultHeader",
         "applyAuth",
         "structuredContent",
@@ -573,10 +761,76 @@ fn validate_mcp_server(root: &Path, report: &mut PackageValidationReport) {
             report.error(format!("mcp-server/src/server.ts missing {marker}"));
         }
     }
+    if policy_schema_version(root) == Some(2) {
+        for marker in [
+            "POLICY_PATH",
+            "PolicySchema",
+            "assertRecipePolicyReconciliation",
+            "assertRequestAllowed",
+            "readBoundedBody",
+            "response.destroy",
+            "AbortController",
+            "assertLiteralHostAllowed",
+            "node:dns",
+            "node:http",
+            "node:https",
+            "DNS_PIN_CACHE",
+            "lookupAndValidateAllAddresses",
+            "all: true, verbatim: true",
+            "resolved.map",
+            "Object.freeze",
+            "createPinnedLookup",
+            "options.all === true",
+            "agent: false",
+            "hostname: logicalHostname",
+            "servername:",
+            "assertNoReadOnlyMethodOverrideTemplate",
+            "isUnsafePathSlot",
+            "FIRSTCALL_ALLOW_MUTATING",
+            "confirm_mutation",
+            "body_truncated",
+            "bytes_read",
+            "import { Ajv",
+            "validateResponseBody",
+            "schema_valid",
+            "validation_errors",
+        ] {
+            if text.contains(marker) {
+                report.pass(format!("mcp-server/src/server.ts contains {marker}"));
+            } else {
+                report.error(format!("mcp-server/src/server.ts missing {marker}"));
+            }
+        }
+        for forbidden in [
+            "fetch(",
+            "process.env.HTTP_PROXY",
+            "process.env.HTTPS_PROXY",
+            "process.env.ALL_PROXY",
+            "process.env.NO_PROXY",
+        ] {
+            if text.contains(forbidden) {
+                report.error(format!(
+                    "mcp-server/src/server.ts contains forbidden proxy-capable marker: {forbidden}"
+                ));
+            } else {
+                report.pass(format!(
+                    "mcp-server/src/server.ts excludes proxy-capable marker: {forbidden}"
+                ));
+            }
+        }
+    }
     if contains_percent_encoded_placeholder(&text) {
         report.error("mcp-server/src/server.ts contains percent-encoded placeholder");
     }
     validate_tool_name(&text, report);
+}
+
+fn policy_schema_version(root: &Path) -> Option<u64> {
+    let text = fs::read_to_string(root.join("policy.json")).ok()?;
+    serde_json::from_str::<Value>(&text)
+        .ok()?
+        .get("schema_version")?
+        .as_u64()
 }
 
 fn validate_tool_name(text: &str, report: &mut PackageValidationReport) {
@@ -640,6 +894,13 @@ fn validate_package_json(root: &Path, report: &mut PackageValidationReport) {
         report,
         &value,
         "mcp-server/package.json",
+        "dependencies",
+        "ajv",
+    );
+    check_object_contains(
+        report,
+        &value,
+        "mcp-server/package.json",
         "devDependencies",
         "typescript",
     );
@@ -650,6 +911,147 @@ fn validate_package_json(root: &Path, report: &mut PackageValidationReport) {
         "devDependencies",
         "@types/node",
     );
+    let has_lock = root.join("mcp-server/package-lock.json").is_file();
+    let reproducible_contract = has_lock || policy_schema_version(root) == Some(2);
+    match value.get("packageManager").and_then(Value::as_str) {
+        Some("npm@11.16.0") => {
+            report.pass("mcp-server/package.json packageManager matches npm@11.16.0")
+        }
+        Some(_) if reproducible_contract => {
+            report.error("mcp-server/package.json packageManager must match npm@11.16.0")
+        }
+        None if reproducible_contract => {
+            report.error("mcp-server/package.json packageManager must be present")
+        }
+        Some(_) => report.warn("legacy mcp-server/package.json uses an unpinned packageManager"),
+        None => report.warn("legacy mcp-server/package.json has no packageManager pin"),
+    }
+    let exact_version = Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$")
+        .expect("valid exact semver regex");
+    for section in ["dependencies", "devDependencies"] {
+        let Some(dependencies) = value.get(section).and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, version) in dependencies {
+            let exact = version
+                .as_str()
+                .is_some_and(|version| exact_version.is_match(version));
+            if exact {
+                report.pass(format!(
+                    "mcp-server/package.json pins {section}.{name} exactly"
+                ));
+            } else if has_lock {
+                report.error(format!(
+                    "mcp-server/package.json {section}.{name} must be an exact semver"
+                ));
+            } else {
+                report.warn(format!(
+                    "legacy package uses a floating dependency: {section}.{name}"
+                ));
+            }
+        }
+    }
+}
+
+fn validate_package_lock(root: &Path, report: &mut PackageValidationReport) {
+    let lock_path = root.join("mcp-server/package-lock.json");
+    if !lock_path.is_file() {
+        return;
+    }
+    let Some(lock) = read_json(root, "mcp-server/package-lock.json", report) else {
+        return;
+    };
+    let Some(package) = read_json(root, "mcp-server/package.json", report) else {
+        return;
+    };
+    report.pass("mcp-server/package-lock.json parses as JSON");
+    match lock.get("lockfileVersion").and_then(Value::as_u64) {
+        Some(3) => report.pass("mcp-server/package-lock.json lockfileVersion is 3"),
+        _ => report.error("mcp-server/package-lock.json lockfileVersion must be 3"),
+    }
+    for field in ["name", "version"] {
+        if lock.get(field) == package.get(field) {
+            report.pass(format!("package lock root {field} matches package.json"));
+        } else {
+            report.error(format!("package lock root {field} must match package.json"));
+        }
+    }
+    let Some(packages) = lock.get("packages").and_then(Value::as_object) else {
+        report.error("mcp-server/package-lock.json packages must be an object");
+        return;
+    };
+    let Some(root_package) = packages.get("").and_then(Value::as_object) else {
+        report.error("mcp-server/package-lock.json packages[''] must exist");
+        return;
+    };
+    for field in [
+        "name",
+        "version",
+        "dependencies",
+        "devDependencies",
+        "engines",
+    ] {
+        if root_package.get(field) == package.get(field) {
+            report.pass(format!(
+                "package lock packages[''].{field} matches package.json"
+            ));
+        } else {
+            report.error(format!(
+                "package lock packages[''].{field} must match package.json"
+            ));
+        }
+    }
+    for section in ["dependencies", "devDependencies"] {
+        let Some(dependencies) = package.get(section).and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, expected_version) in dependencies {
+            let path = format!("node_modules/{name}");
+            let Some(entry) = packages.get(&path).and_then(Value::as_object) else {
+                report.error(format!(
+                    "package lock is missing direct dependency entry: {path}"
+                ));
+                continue;
+            };
+            if entry.get("version") == Some(expected_version) {
+                report.pass(format!(
+                    "package lock direct dependency version matches: {name}"
+                ));
+            } else {
+                report.error(format!(
+                    "package lock direct dependency version must match package.json: {name}"
+                ));
+            }
+        }
+    }
+    let mut transitive_count = 0usize;
+    for (path, entry) in packages {
+        if path.is_empty() || !path.starts_with("node_modules/") {
+            continue;
+        }
+        transitive_count += 1;
+        let valid = entry.get("version").and_then(Value::as_str).is_some()
+            && entry
+                .get("resolved")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.starts_with("https://registry.npmjs.org/"))
+            && entry
+                .get("integrity")
+                .and_then(Value::as_str)
+                .is_some_and(is_sha512_integrity);
+        if !valid {
+            report.error(format!(
+                "package lock entry must pin version, registry URL, and integrity: {path}"
+            ));
+        }
+    }
+    if transitive_count > 0 {
+        report.pass(format!(
+            "package lock pins {transitive_count} installed dependency entries"
+        ));
+    } else {
+        report.error("mcp-server/package-lock.json must pin installed dependencies");
+    }
 }
 
 fn validate_tsconfig_json(root: &Path, report: &mut PackageValidationReport) {
@@ -711,7 +1113,7 @@ fn run_mcp_compile_smoke(root: &Path, report: &mut PackageValidationReport) {
         set_mcp_smoke_status(
             report,
             McpCompileSmokeStatus::Warning,
-            "MCP compile smoke skipped because mcp-server/node_modules is missing; run npm install manually in mcp-server to enable it",
+            "MCP compile smoke skipped because mcp-server/node_modules is missing; run npm ci --ignore-scripts manually in mcp-server to enable it",
         );
         return;
     }
@@ -913,7 +1315,7 @@ fn validate_manifest_files(root: &Path, value: &Value, report: &mut PackageValid
         report.error(format!("manifest duplicate path: {path}"));
     }
 
-    for expected in MANIFESTED_FILES {
+    for expected in manifested_files_for_validation(root) {
         if entries.contains_key(*expected) {
             report.pass(format!("manifest includes expected file: {expected}"));
         } else {
@@ -969,7 +1371,7 @@ fn validate_manifest_file_hash(
 }
 
 fn scan_expected_text_files(root: &Path, report: &mut PackageValidationReport) {
-    for relative in MANIFESTED_FILES {
+    for relative in manifested_files_for_validation(root) {
         let Some(text) = read_expected_text(root, relative, report) else {
             continue;
         };
@@ -978,6 +1380,26 @@ fn scan_expected_text_files(root: &Path, report: &mut PackageValidationReport) {
     if let Some(text) = read_expected_text(root, MANIFEST_FILE, report) {
         scan_text_for_secrets(report, MANIFEST_FILE, &text);
     }
+}
+
+fn manifested_files_for_validation(root: &Path) -> &'static [&'static str] {
+    if root.join("mcp-server/package-lock.json").is_file() || policy_schema_version(root) == Some(2)
+    {
+        MANIFESTED_FILES
+    } else {
+        LEGACY_MANIFESTED_FILES
+    }
+}
+
+fn is_sha512_integrity(value: &str) -> bool {
+    let Some(encoded) = value.strip_prefix("sha512-") else {
+        return false;
+    };
+    !encoded.is_empty()
+        && !encoded.chars().any(char::is_whitespace)
+        && base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .is_ok_and(|digest| digest.len() == 64)
 }
 
 fn scan_text_for_secrets(report: &mut PackageValidationReport, relative: &str, text: &str) {

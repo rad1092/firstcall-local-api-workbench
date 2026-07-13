@@ -54,12 +54,17 @@ cargo run --locked --bin firstcall-cli -- validate-package --dir ./tmp/demo-pkg 
 cargo run --locked --bin firstcall-cli -- inspect-package --dir ./tmp/demo-pkg --json
 ```
 
-Generated packages include `recipe.yaml`, `verified.lock.json`, `policy.json`, `skill.md`, `package.manifest.json`, and a TypeScript `mcp-server/`. Runtime MCP confidence is checked separately by installing generated dependencies, building the server, listing tools, and calling the generated tool.
+Generated packages include `recipe.yaml`, `verified.lock.json`, `policy.json`, `skill.md`, `package.manifest.json`, and a TypeScript `mcp-server/` with an npm lockfile. Runtime MCP confidence is checked separately with `npm ci --ignore-scripts`, a TypeScript build, MCP tool discovery, and a real generated-tool call.
 
 ## Safety
 
 - Secrets are represented as environment variables and are not intentionally written to SQLite, package files, CLI reports, logs, or demo assets.
 - Package validation checks schema, policy, manifest hashes, generated MCP markers, and obvious secret leaks; import-readiness also recomputes verified lock fingerprints against `recipe.yaml`.
+- Local verification and generated MCP execution do not follow redirects and cap response bodies at 1 MiB before previewing them.
+- Local verification disables system/environment proxies, validates the complete DNS answer set off the reqwest runtime thread, and pins the first successful set for the secure client's lifetime. Rebuilding the client refreshes the pin; failed lookups remain fail-closed but can be retried.
+- Generated MCP servers load package-root `policy.json` at startup and fail closed on malformed or inconsistent policy. They enforce the exported method, exact origin, path template, blocked routing/override headers, a 30-second timeout, response limit, and mutation confirmation at runtime.
+- The generated Node runtime validates the complete first DNS answer set, pins it for the MCP process lifetime, and connects directly to one validated address while preserving the original Host header and TLS SNI. It does not consume proxy environment variables; restart the process to refresh DNS or recover from a cached rejected lookup.
+- Preserved response schemas are sanitized before storage/export and are validated again by both CLI verification and the generated MCP runtime; truncated or schema-invalid HTTP 2xx responses are not reported as successful tool results.
 - Imported packages are marked as requiring local re-verification before `package --recipe-id` can export them again.
 - Static adapters do not execute imported scripts, tests, hooks, captures, assertions, or environment files.
 

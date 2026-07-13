@@ -211,7 +211,7 @@ pub struct FirstCallApp {
     pub repository: AppRepository,
     pub secret_store: Box<dyn SecretStore>,
     pub secret_status: SecretStoreStatus,
-    pub http_client: Client,
+    pub http_client: Option<Client>,
     pub status_message: Option<String>,
     pub bootstrap_warning: Option<String>,
     running_execution: Option<RunningExecution>,
@@ -231,13 +231,25 @@ impl FirstCallApp {
 
     pub fn bootstrap_with_options(options: BootstrapOptions) -> Self {
         let initial_screen = options.initial_screen.unwrap_or(TopScreen::NewAttempt);
-        let (paths, repository, bootstrap_warning) = bootstrap_repository(options.paths);
+        let (paths, repository, mut bootstrap_warning) = bootstrap_repository(options.paths);
         let settings = repository.load_settings().unwrap_or_default();
         let attempts = repository.list_attempts().unwrap_or_default();
         let recipes = repository.list_recipes().unwrap_or_default();
         let secret_store = default_secret_store();
         let secret_status = secret_store.status();
-        let http_client = build_http_client(&settings).unwrap_or_else(|_| Client::new());
+        let http_client = match build_http_client(&settings) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                let warning = format!(
+                    "HTTP execution disabled because the secure client could not be initialized: {error}"
+                );
+                bootstrap_warning = Some(match bootstrap_warning.take() {
+                    Some(existing) => format!("{existing}\n{warning}"),
+                    None => warning,
+                });
+                None
+            }
+        };
 
         let mut app = Self {
             screen: initial_screen,
@@ -381,7 +393,11 @@ impl FirstCallApp {
         let source_inputs_snapshot =
             safe_source_inputs_for_execution(&self.parsed_sources, &self.inputs);
         let settings = self.settings.clone();
-        let client = self.http_client.clone();
+        let Some(client) = self.http_client.clone() else {
+            self.status_message =
+                Some("Cannot run request: secure HTTP client is unavailable".to_string());
+            return;
+        };
         let (sender, receiver) = mpsc::channel();
         self.clear_completed_execution_state();
         self.running_execution = Some(RunningExecution {
@@ -439,12 +455,13 @@ impl FirstCallApp {
         }
         match build_http_client(&self.settings) {
             Ok(client) => {
-                self.http_client = client;
+                self.http_client = Some(client);
                 self.status_message = Some("Settings saved".to_string());
             }
             Err(error) => {
+                self.http_client = None;
                 self.status_message = Some(format!(
-                    "Settings saved, but client rebuild failed: {error}"
+                    "Settings saved, but HTTP execution was disabled because secure client rebuild failed: {error}"
                 ));
             }
         }
@@ -605,6 +622,10 @@ impl FirstCallApp {
 impl FirstCallApp {
     pub(crate) fn is_running(&self) -> bool {
         self.running_execution.is_some()
+    }
+
+    pub(crate) fn http_execution_available(&self) -> bool {
+        self.http_client.is_some()
     }
 
     pub(crate) fn missing_required_slot_count(&self, draft: &RequestDraft) -> usize {
@@ -858,7 +879,7 @@ fn recipe_to_draft(recipe: Recipe) -> RequestDraft {
             overall: crate::model::Confidence::High,
             notes: "Loaded from saved recipe".to_string(),
         },
-        response_schema: None,
+        response_schema: recipe.response_schema.clone(),
         unsupported_reason: None,
         source_kinds: Vec::new(),
     }
@@ -919,6 +940,7 @@ fn recipe_from_executed_draft(executed_draft: &RequestDraft, result: &ExecutionR
         body_template: sanitized.body.clone(),
         auth_style: sanitized.auth.clone(),
         slots: sanitized.slots.clone(),
+        response_schema: sanitized.response_schema.clone(),
         last_success_at: Some(Utc::now()),
         last_success_status: result
             .response_snapshot
@@ -1005,10 +1027,11 @@ mod tests {
     use std::sync::mpsc;
 
     use secrecy::SecretString;
+    use serde_json::json;
 
     use crate::model::{
         AuthStyle, BodyTemplate, Confidence, EvidenceItem, FieldConfidence, RenderedRequest,
-        ResponseSnapshot, RuntimeSlot, SourceInput, SourceKind,
+        ResponseSnapshot, RuntimeSlot, SchemaSpec, SourceInput, SourceKind,
     };
     use crate::store::db::AppPaths;
     use crate::store::repos::AppRepository;
@@ -1145,6 +1168,35 @@ mod tests {
             .expect("saved recipe");
         assert!(recipe.url_template.ends_with("/executed"));
         assert!(!recipe.url_template.ends_with("/edited"));
+    }
+
+    #[test]
+    fn recipe_creation_and_rerun_preserve_sanitized_response_schema() {
+        let mut executed_draft = draft_with_path("/schema");
+        executed_draft.response_schema = Some(SchemaSpec {
+            name: Some("response".to_string()),
+            schema: json!({
+                "type": "object",
+                "examples": [{ "api_key": "example_secret_123" }],
+                "properties": {
+                    "api_key": { "type": "string", "enum": ["raw_secret_123"] },
+                    "status": { "type": "string", "enum": ["ok"] }
+                }
+            }),
+        });
+
+        let recipe = recipe_from_executed_draft(&executed_draft, &success_result("/schema"));
+        let schema = recipe
+            .response_schema
+            .as_ref()
+            .expect("recipe response schema");
+        assert!(schema.schema.get("examples").is_none());
+        assert!(schema.schema["properties"]["api_key"].get("enum").is_none());
+        assert_eq!(schema.schema["properties"]["status"]["enum"], json!(["ok"]));
+        let expected_schema = schema.clone();
+
+        let rerun = recipe_to_draft(recipe);
+        assert_eq!(rerun.response_schema, Some(expected_schema));
     }
 
     #[test]
@@ -1359,6 +1411,25 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_secure_client_blocks_execution_without_fallback() {
+        let draft = draft_with_slots(vec![
+            runtime_slot("bearer_token", SlotLocation::Auth, true, Some("test-token")),
+            runtime_slot("user_id", SlotLocation::Path, true, Some("42")),
+        ]);
+        let mut app = app_with_working_draft(draft);
+        app.http_client = None;
+
+        app.run_current_draft();
+
+        assert!(app.running_execution.is_none());
+        assert!(app.last_execution.is_none());
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Cannot run request: secure HTTP client is unavailable")
+        );
+    }
+
+    #[test]
     fn analyze_inputs_while_running_does_not_clear_running_execution() {
         let mut app = app_with_working_draft(draft_with_path("/running"));
         app.inputs.curl = "curl https://before.example.com".to_string();
@@ -1458,6 +1529,8 @@ mod tests {
                 status: Some(200),
                 headers: Vec::new(),
                 body_preview: "{}".to_string(),
+                body_truncated: false,
+                bytes_read: 2,
                 elapsed_ms: 1,
                 validation_errors: Vec::new(),
                 transport_error: None,
@@ -1498,7 +1571,9 @@ mod tests {
             repository: AppRepository::new(connection),
             secret_store,
             secret_status,
-            http_client: Client::new(),
+            http_client: Some(
+                build_http_client(&AppSettings::default()).expect("secure test HTTP client"),
+            ),
             status_message: None,
             bootstrap_warning: None,
             running_execution: None,

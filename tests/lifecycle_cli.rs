@@ -286,6 +286,7 @@ fn lifecycle_recipe(base_url: &str) -> Recipe {
                 confidence: Confidence::High,
             },
         ],
+        response_schema: None,
         last_success_at: Some(verified_time()),
         last_success_status: Some(200),
     }
@@ -407,6 +408,7 @@ fn assert_package_files(root: &Path) {
         "policy.json",
         "package.manifest.json",
         "mcp-server/package.json",
+        "mcp-server/package-lock.json",
         "mcp-server/tsconfig.json",
         "mcp-server/src/server.ts",
         "mcp-server/README.md",

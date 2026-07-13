@@ -809,6 +809,7 @@ fn bearer_recipe(method: &str) -> Recipe {
                 confidence: Confidence::High,
             },
         ],
+        response_schema: None,
         last_success_at: Some(verified_time()),
         last_success_status: Some(200),
     }
@@ -832,6 +833,7 @@ fn no_auth_recipe(method: &str) -> Recipe {
             description: String::new(),
             confidence: Confidence::High,
         }],
+        response_schema: None,
         last_success_at: Some(verified_time()),
         last_success_status: Some(200),
     }

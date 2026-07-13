@@ -167,7 +167,7 @@ pub struct RuntimeSlot {
     pub confidence: Confidence,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SchemaSpec {
     pub name: Option<String>,
     pub schema: serde_json::Value,
@@ -245,6 +245,10 @@ pub struct ResponseSnapshot {
     pub status: Option<u16>,
     pub headers: Vec<RenderedHeader>,
     pub body_preview: String,
+    #[serde(default)]
+    pub body_truncated: bool,
+    #[serde(default)]
+    pub bytes_read: usize,
     pub elapsed_ms: u128,
     pub validation_errors: Vec<String>,
     pub transport_error: Option<String>,
@@ -276,6 +280,7 @@ pub enum Blocker {
     DocsUnclear,
     UnsupportedInput,
     NetworkBlocked,
+    ResourceLimitExceeded,
     SchemaMismatch,
     UnknownFailure,
 }
@@ -288,6 +293,7 @@ impl Blocker {
             Self::DocsUnclear => "docs_unclear",
             Self::UnsupportedInput => "unsupported_input",
             Self::NetworkBlocked => "network_blocked",
+            Self::ResourceLimitExceeded => "resource_limit_exceeded",
             Self::SchemaMismatch => "schema_mismatch",
             Self::UnknownFailure => "unknown_failure",
         }
@@ -319,6 +325,8 @@ pub struct Recipe {
     pub body_template: BodyTemplate,
     pub auth_style: AuthStyle,
     pub slots: Vec<RuntimeSlot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<SchemaSpec>,
     pub last_success_at: Option<DateTime<Utc>>,
     pub last_success_status: Option<u16>,
 }
@@ -327,6 +335,8 @@ pub struct Recipe {
 pub struct AppSettings {
     pub timeout_secs: u64,
     pub response_preview_limit_bytes: usize,
+    #[serde(default = "default_response_body_limit_bytes")]
+    pub response_body_limit_bytes: usize,
     pub success_status_min: u16,
     pub success_status_max: u16,
 }
@@ -336,10 +346,15 @@ impl Default for AppSettings {
         Self {
             timeout_secs: 30,
             response_preview_limit_bytes: 131_072,
+            response_body_limit_bytes: default_response_body_limit_bytes(),
             success_status_min: 200,
             success_status_max: 299,
         }
     }
+}
+
+fn default_response_body_limit_bytes() -> usize {
+    1_048_576
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -383,4 +398,72 @@ pub struct ExecutionResult {
     pub outcome: Outcome,
     pub blocker: Option<Blocker>,
     pub notes: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{AppSettings, Recipe, SchemaSpec};
+
+    const LEGACY_RECIPE_JSON: &str = r#"{
+        "id": null,
+        "name": "Legacy recipe",
+        "method": "GET",
+        "url_template": "https://api.example.com/users",
+        "headers_template": [],
+        "query_template": [],
+        "body_template": "none",
+        "auth_style": "none",
+        "slots": [],
+        "last_success_at": null,
+        "last_success_status": null
+    }"#;
+
+    #[test]
+    fn schema_spec_implements_eq() {
+        fn assert_eq<T: Eq>() {}
+        assert_eq::<SchemaSpec>();
+    }
+
+    #[test]
+    fn legacy_recipe_deserializes_without_response_schema() {
+        let recipe: Recipe = serde_json::from_str(LEGACY_RECIPE_JSON).expect("legacy recipe");
+
+        assert!(recipe.response_schema.is_none());
+        let serialized = serde_json::to_value(&recipe).expect("serialize recipe");
+        assert!(serialized.get("response_schema").is_none());
+    }
+
+    #[test]
+    fn recipe_response_schema_round_trips() {
+        let mut recipe: Recipe = serde_json::from_str(LEGACY_RECIPE_JSON).expect("legacy recipe");
+        recipe.response_schema = Some(SchemaSpec {
+            name: Some("response".to_string()),
+            schema: json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": { "id": { "type": "string" } }
+            }),
+        });
+
+        let serialized = serde_json::to_string(&recipe).expect("serialize recipe");
+        let round_trip: Recipe = serde_json::from_str(&serialized).expect("round-trip recipe");
+
+        assert_eq!(round_trip, recipe);
+    }
+
+    #[test]
+    fn legacy_settings_receive_a_bounded_response_default() {
+        let settings: AppSettings = serde_json::from_value(json!({
+            "timeout_secs": 30,
+            "response_preview_limit_bytes": 131072,
+            "success_status_min": 200,
+            "success_status_max": 299
+        }))
+        .expect("legacy settings");
+
+        assert_eq!(settings.response_body_limit_bytes, 1_048_576);
+        assert!(settings.response_preview_limit_bytes <= settings.response_body_limit_bytes);
+    }
 }

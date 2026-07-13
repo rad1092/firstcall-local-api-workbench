@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -14,6 +14,28 @@ use crate::model::{
 pub(crate) const PRODUCT_LABEL: &str = "FirstCall Agent Recipes";
 pub(crate) const TAGLINE: &str = "Verified API tool recipes for AI agents.";
 pub(crate) const GENERATOR: &str = "firstcall";
+pub(crate) const BLOCKED_REQUEST_HEADERS: &[&str] = &[
+    "Host",
+    "Content-Length",
+    "Transfer-Encoding",
+    "Connection",
+    "Upgrade",
+    "Proxy-Authorization",
+    "Proxy-Connection",
+    "Keep-Alive",
+    "TE",
+    "Trailer",
+    "Cookie",
+    "Forwarded",
+    "X-Forwarded-Host",
+    "X-Forwarded-Proto",
+    "X-Forwarded-For",
+    "X-Original-URL",
+    "X-Rewrite-URL",
+    "X-HTTP-Method-Override",
+    "X-Method-Override",
+    "X-HTTP-Method",
+];
 
 pub(crate) fn has_successful_verification(recipe: &Recipe) -> bool {
     recipe.last_success_at.is_some() && matches!(recipe.last_success_status, Some(200..=299))
@@ -30,6 +52,15 @@ pub(crate) struct ExportSlot {
 pub(crate) struct EnvRequirement {
     pub name: String,
     pub description: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentUrlTemplateParts {
+    pub origin: String,
+    pub host: String,
+    pub path_template: String,
+    pub legacy_path: String,
+    pub query_pairs: Vec<(String, String)>,
 }
 
 pub(crate) fn recipe_slug(name: &str) -> String {
@@ -226,13 +257,112 @@ pub(crate) fn export_slots(slots: &[RuntimeSlot]) -> Vec<ExportSlot> {
 }
 
 pub(crate) fn parse_url_template(url_template: &str) -> Result<(String, String)> {
-    let sanitized = template_to_url_placeholders(url_template);
-    let parsed = Url::parse(&sanitized).context("Recipe URL template must be absolute")?;
+    let parts = parse_agent_url_template(url_template)?;
+    Ok((parts.host, parts.legacy_path))
+}
+
+pub(crate) fn parse_agent_url_template(url_template: &str) -> Result<AgentUrlTemplateParts> {
+    let normalized = sanitize_url_template_for_agent(url_template);
+    if normalized.contains('#') {
+        bail!("Recipe URL template must not include a fragment");
+    }
+    if normalized.contains('\\') {
+        bail!("Recipe URL template must not include backslashes");
+    }
+
+    let scheme_end = normalized
+        .find("://")
+        .context("Recipe URL template must be absolute")?;
+    let authority_start = scheme_end + 3;
+    let authority_end = normalized[authority_start..]
+        .find(['/', '?'])
+        .map(|index| authority_start + index)
+        .unwrap_or(normalized.len());
+    let authority = &normalized[authority_start..authority_end];
+    if authority.is_empty() {
+        bail!("Recipe URL template must include a host");
+    }
+    if contains_url_placeholder(authority) {
+        bail!("Recipe URL template authority must not contain placeholders");
+    }
+
+    let parseable = template_to_url_placeholders(&normalized);
+    let parsed = Url::parse(&parseable).context("Recipe URL template must be absolute")?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("Recipe URL template scheme must be http or https");
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("Recipe URL template must not include userinfo");
+    }
+    validate_literal_host(&parsed)?;
     let host = parsed
         .host_str()
         .context("Recipe URL template must include a host")?
         .to_string();
-    Ok((host, parsed.path().to_string()))
+    let origin = parsed.origin().ascii_serialization();
+
+    let remainder = &normalized[authority_end..];
+    let (path_template, raw_query) = if remainder.is_empty() {
+        ("/".to_string(), None)
+    } else if let Some(query) = remainder.strip_prefix('?') {
+        ("/".to_string(), Some(query))
+    } else if let Some((path, query)) = remainder.split_once('?') {
+        (path.to_string(), Some(query))
+    } else {
+        (remainder.to_string(), None)
+    };
+    if !path_template.starts_with('/') {
+        bail!("Recipe URL template path must be absolute");
+    }
+
+    let mut query_pairs = Vec::new();
+    if let Some(query) = raw_query {
+        for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            if contains_url_placeholder(&key) {
+                bail!("Recipe URL template query keys must not contain placeholders");
+            }
+            let key = key.into_owned();
+            let value = value.into_owned();
+            let value = if is_secret_key(&key) || value.contains(REDACTED) {
+                env_ref(&secret_env_for_key(&key, &value))
+            } else {
+                value
+            };
+            query_pairs.push((key, value));
+        }
+    }
+
+    Ok(AgentUrlTemplateParts {
+        origin,
+        host,
+        path_template,
+        legacy_path: parsed.path().to_string(),
+        query_pairs,
+    })
+}
+
+fn validate_literal_host(url: &Url) -> Result<()> {
+    match url.host() {
+        Some(url::Host::Ipv4(address)) if disallowed_ipv4(address) => {
+            bail!("Recipe URL template targets a disallowed IPv4 address class")
+        }
+        Some(url::Host::Ipv6(address)) if disallowed_ipv6(address) => {
+            bail!("Recipe URL template targets a disallowed IPv6 address class")
+        }
+        Some(_) => Ok(()),
+        None => bail!("Recipe URL template must include a host"),
+    }
+}
+
+fn disallowed_ipv4(address: std::net::Ipv4Addr) -> bool {
+    address.is_unspecified() || address.is_link_local() || address.is_multicast()
+}
+
+fn disallowed_ipv6(address: std::net::Ipv6Addr) -> bool {
+    address.is_unspecified()
+        || address.is_unicast_link_local()
+        || address.is_multicast()
+        || address.to_ipv4_mapped().is_some_and(disallowed_ipv4)
 }
 
 pub(crate) fn destructive_method(method: &str) -> bool {
@@ -240,6 +370,63 @@ pub(crate) fn destructive_method(method: &str) -> bool {
         method.to_ascii_uppercase().as_str(),
         "DELETE" | "PATCH" | "PUT"
     )
+}
+
+pub(crate) fn ensure_no_read_only_method_override(
+    recipe: &Recipe,
+    url_query_pairs: &[(String, String)],
+) -> Result<()> {
+    if !matches!(recipe.method.to_ascii_uppercase().as_str(), "GET" | "HEAD") {
+        return Ok(());
+    }
+
+    let has_override_header = recipe
+        .headers_template
+        .iter()
+        .any(|header| matches_method_override_header(&header.key))
+        || match &recipe.auth_style {
+            AuthStyle::Bearer { header_name, .. } | AuthStyle::HeaderApiKey { header_name, .. } => {
+                matches_method_override_header(header_name)
+            }
+            AuthStyle::None | AuthStyle::Basic { .. } | AuthStyle::QueryApiKey { .. } => false,
+        };
+    if has_override_header {
+        bail!("GET/HEAD recipes must not contain an HTTP method override header");
+    }
+
+    let has_override_query = url_query_pairs
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case("_method"))
+        || recipe
+            .query_template
+            .iter()
+            .any(|field| field.key.eq_ignore_ascii_case("_method"))
+        || matches!(
+            &recipe.auth_style,
+            AuthStyle::QueryApiKey { param_name, .. } if param_name.eq_ignore_ascii_case("_method")
+        );
+    if has_override_query {
+        bail!("GET/HEAD recipes must not contain a _method query parameter");
+    }
+
+    if matches!(
+        &recipe.body_template,
+        BodyTemplate::Form { fields } | BodyTemplate::Multipart { fields }
+            if fields.iter().any(|field| field.key.eq_ignore_ascii_case("_method"))
+    ) {
+        bail!("GET/HEAD recipes must not contain a _method form field");
+    }
+    Ok(())
+}
+
+fn matches_method_override_header(header: &str) -> bool {
+    [
+        "X-HTTP-Method-Override",
+        "X-Method-Override",
+        "X-HTTP-Method",
+    ]
+    .iter()
+    .any(|candidate| header.eq_ignore_ascii_case(candidate))
 }
 
 pub(crate) fn looks_destructive_path(path: &str) -> bool {
@@ -422,6 +609,12 @@ fn template_to_url_placeholders(text: &str) -> String {
         Regex::new(r"\$\{\s*[A-Za-z0-9_\-]+\s*\}").expect("valid dollar brace regex");
     let replaced = double_brace.replace_all(text, "slot");
     dollar_brace.replace_all(&replaced, "slot").to_string()
+}
+
+fn contains_url_placeholder(text: &str) -> bool {
+    let placeholder =
+        Regex::new(r"\$\{\s*[A-Za-z0-9_\-]+\s*\}").expect("valid URL placeholder regex");
+    placeholder.is_match(text)
 }
 
 fn sanitize_query_params(normalized_url: &str) -> String {

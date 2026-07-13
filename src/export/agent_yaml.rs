@@ -4,7 +4,8 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::model::{AuthStyle, Recipe};
+use crate::exec::redact::sanitize_response_schema;
+use crate::model::{AuthStyle, Recipe, SchemaSpec};
 
 use super::agent_common::{
     ExportSlot, GENERATOR, TAGLINE, all_env_requirements, auth_type, body_kind,
@@ -26,6 +27,8 @@ struct AgentRecipeYaml {
     body_kind: String,
     body_template: Value,
     slots: Vec<ExportSlot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_schema: Option<SchemaSpec>,
     verified: VerifiedYaml,
     security: SecurityYaml,
 }
@@ -74,6 +77,10 @@ pub fn recipe_to_agent_yaml(recipe: &Recipe) -> Result<String> {
         body_kind: body_kind(&recipe.body_template).to_string(),
         body_template: body_template_value(&recipe.body_template),
         slots: export_slots(&recipe.slots),
+        response_schema: recipe
+            .response_schema
+            .as_ref()
+            .map(sanitize_response_schema),
         verified: VerifiedYaml {
             last_success_at: recipe
                 .last_success_at

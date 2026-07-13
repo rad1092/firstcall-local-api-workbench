@@ -9,11 +9,11 @@ use firstcall::export::policy::recipe_to_policy_json;
 use firstcall::export::verified_lock::recipe_to_verified_lock_json;
 use firstcall::model::{
     AuthStyle, BodyTemplate, Confidence, HeaderField, KeyValueField, Recipe, RuntimeSlot,
-    SlotLocation,
+    SchemaSpec, SlotLocation,
 };
 use firstcall::store::db::{AppPaths, open_database};
 use firstcall::store::repos::AppRepository;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 
 const RAW_SECRET: &str = "sk_test_raw_secret_123";
@@ -90,8 +90,56 @@ fn policy_extracts_host_path_and_requires_confirmation_for_mutating_methods() {
     let post = fake_recipe("POST", "https://api.stripe.com/v1/customers");
     let policy: Value =
         serde_json::from_str(&recipe_to_policy_json(&post).expect("policy")).expect("json");
+    assert_eq!(policy["schema_version"], 2);
+    assert_eq!(policy["allowed_origins"][0], "https://api.stripe.com");
+    assert_eq!(policy["allowed_path_templates"][0], "/v1/customers");
     assert_eq!(policy["allowed_hosts"][0], "api.stripe.com");
     assert_eq!(policy["allowed_paths"][0], "/v1/customers");
+    assert_eq!(policy["redirect_policy"]["mode"], "none");
+    assert_eq!(policy["redirect_policy"]["max_hops"], 0);
+    assert_eq!(policy["dns_policy"]["resolve_all_addresses"], true);
+    assert_eq!(policy["dns_policy"]["pin_connection"], true);
+    assert_eq!(policy["dns_policy"]["allow_loopback"], true);
+    assert_eq!(policy["dns_policy"]["allow_private_networks"], true);
+    assert_eq!(
+        policy["dns_policy"]["blocked_address_classes"],
+        json!(["unspecified", "link_local", "multicast"])
+    );
+    assert_eq!(policy["proxy_policy"]["mode"], "direct");
+    assert_eq!(policy["proxy_policy"]["environment_variables"], "ignore");
+    assert_eq!(policy["timeout_ms"], 30_000);
+    assert_eq!(policy["max_response_bytes"], 1_048_576);
+    assert_eq!(policy["requires_confirmation"], true);
+    let blocked_headers = policy["blocked_headers"]
+        .as_array()
+        .expect("blocked headers");
+    for required in [
+        "Host",
+        "Content-Length",
+        "Transfer-Encoding",
+        "Connection",
+        "Upgrade",
+        "Proxy-Authorization",
+        "Cookie",
+        "Forwarded",
+        "X-Forwarded-Host",
+        "X-Forwarded-Proto",
+        "X-Forwarded-For",
+        "X-Original-URL",
+        "X-Rewrite-URL",
+        "X-HTTP-Method-Override",
+        "X-Method-Override",
+        "X-HTTP-Method",
+    ] {
+        assert!(
+            blocked_headers.iter().any(|header| header == required),
+            "missing blocked header {required}"
+        );
+    }
+
+    let get = fake_recipe("GET", "https://api.example.com/v1/customers");
+    let policy: Value =
+        serde_json::from_str(&recipe_to_policy_json(&get).expect("policy")).expect("json");
     assert_eq!(policy["requires_confirmation"], false);
 
     for method in ["DELETE", "PATCH", "PUT"] {
@@ -100,6 +148,104 @@ fn policy_extracts_host_path_and_requires_confirmation_for_mutating_methods() {
             serde_json::from_str(&recipe_to_policy_json(&recipe).expect("policy")).expect("json");
         assert_eq!(policy["requires_confirmation"], true);
     }
+}
+
+#[test]
+fn read_only_method_override_recipes_fail_closed_at_export() {
+    for name in [
+        "X-HTTP-Method-Override",
+        "X-Method-Override",
+        "X-HTTP-Method",
+    ] {
+        let mut recipe = fake_recipe("GET", "https://api.example.com/users");
+        recipe.headers_template.push(HeaderField {
+            key: name.to_string(),
+            value: "DELETE".to_string(),
+            required: true,
+            description: String::new(),
+            confidence: Confidence::High,
+        });
+        assert!(recipe_to_policy_json(&recipe).is_err(), "header={name}");
+        assert!(export_agent_package(&recipe, tempdir().expect("tempdir").path()).is_err());
+    }
+
+    let query = fake_recipe("GET", "https://api.example.com/users?_METHOD=DELETE");
+    assert!(recipe_to_policy_json(&query).is_err());
+
+    let mut form = fake_recipe("GET", "https://api.example.com/users");
+    form.body_template = BodyTemplate::Form {
+        fields: vec![KeyValueField {
+            key: "_method".to_string(),
+            value: "DELETE".to_string(),
+            required: true,
+            description: String::new(),
+            confidence: Confidence::High,
+        }],
+    };
+    assert!(recipe_to_policy_json(&form).is_err());
+}
+
+#[test]
+fn policy_rejects_unsafe_url_authority_and_components() {
+    for url in [
+        "https://${host}/users",
+        "https://{{host}}/users",
+        "https://user:password@api.example.com/users",
+        "https://api.example.com/users#fragment",
+        "ftp://api.example.com/users",
+        "https://api.example.com\\users",
+    ] {
+        let recipe = fake_recipe("GET", url);
+        assert!(
+            recipe_to_policy_json(&recipe).is_err(),
+            "unsafe URL template should be rejected: {url}"
+        );
+    }
+}
+
+#[test]
+fn policy_rejects_disallowed_literal_ip_classes_including_ipv4_mapped_ipv6() {
+    for url in [
+        "http://0.0.0.0/users",
+        "http://169.254.1.1/users",
+        "http://224.0.0.1/users",
+        "http://[::]/users",
+        "http://[fe80::1]/users",
+        "http://[ff02::1]/users",
+        "http://[::ffff:0:0]/users",
+        "http://[::ffff:a9fe:101]/users",
+        "http://[::ffff:e000:1]/users",
+    ] {
+        let recipe = fake_recipe("GET", url);
+        assert!(
+            recipe_to_policy_json(&recipe).is_err(),
+            "disallowed literal IP should be rejected: {url}"
+        );
+        assert!(export_agent_package(&recipe, tempdir().expect("tempdir").path()).is_err());
+    }
+
+    for url in [
+        "http://127.0.0.1/users",
+        "http://10.0.0.1/users",
+        "http://[::1]/users",
+        "http://[::ffff:7f00:1]/users",
+    ] {
+        let recipe = fake_recipe("GET", url);
+        assert!(
+            recipe_to_policy_json(&recipe).is_ok(),
+            "allowed literal IP should remain supported: {url}"
+        );
+    }
+}
+
+#[test]
+fn policy_preserves_runtime_path_template_but_legacy_path_remains_parse_safe() {
+    let recipe = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    let policy: Value =
+        serde_json::from_str(&recipe_to_policy_json(&recipe).expect("policy")).expect("json");
+
+    assert_eq!(policy["allowed_path_templates"][0], "/users/${user_id}");
+    assert_eq!(policy["allowed_paths"][0], "/users/slot");
 }
 
 #[test]
@@ -115,6 +261,7 @@ fn package_export_creates_expected_files_without_raw_secrets() {
         "policy.json",
         "package.manifest.json",
         "mcp-server/package.json",
+        "mcp-server/package-lock.json",
         "mcp-server/tsconfig.json",
         "mcp-server/src/server.ts",
         "mcp-server/README.md",
@@ -233,7 +380,7 @@ fn generated_server_template_has_stricter_types_and_header_defaulting() {
     assert!(server.contains("server.registerTool"));
     assert!(server.contains("type ToolArgs"));
     assert!(server.contains("Record<string, string>"));
-    assert!(server.contains("RequestInit"));
+    assert!(server.contains("https.RequestOptions"));
     assert!(server.contains("setDefaultHeader"));
     assert!(server.contains("const inputSchema = z.object(inputShape);"));
 }
@@ -248,12 +395,121 @@ fn generated_mcp_server_contains_structured_output_markers() {
     assert!(server.contains("structuredContent"));
     assert!(server.contains("outputSchema"));
     assert!(server.contains("body_preview"));
+    assert!(server.contains("body_truncated"));
+    assert!(server.contains("bytes_read"));
     assert!(server.contains("redactResponsePreview"));
     assert!(server.contains("redactSensitiveText"));
 }
 
 #[test]
-fn generated_mcp_server_sends_multipart_as_form_data() {
+fn generated_mcp_server_enforces_policy_origin_redirect_and_body_limit() {
+    let recipe = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+
+    assert!(server.contains("readFileSync"));
+    assert!(server.contains("new URL(\"../../policy.json\", import.meta.url)"));
+    assert!(server.contains("schema_version: z.literal(2)"));
+    assert!(server.contains("timeout_ms: z.literal(30000)"));
+    assert!(server.contains("max_response_bytes: z.literal(1048576)"));
+    assert!(server.contains("}).strict()"));
+    assert!(server.contains("assertRecipePolicyReconciliation"));
+    assert!(server.contains("assertRequestAllowed"));
+    assert!(server.contains("Redirect blocked by policy"));
+    assert!(server.contains("readBoundedBody"));
+    assert!(server.contains("response.destroy()"));
+    assert!(server.contains("new AbortController()"));
+    assert!(server.contains("abortController.signal"));
+    assert!(server.contains("Request timed out after ${POLICY.timeout_ms} ms"));
+    assert!(server.contains("response.ok && !boundedBody.truncated"));
+    assert!(server.contains("assertLiteralHostAllowed"));
+    assert!(server.contains("classifyIpv6"));
+    assert!(server.contains("return classifyIpv4(address.slice(12))"));
+    assert!(server.contains("dns.lookup(hostname, { all: true, verbatim: true })"));
+    assert!(
+        server
+            .contains("const DNS_PIN_CACHE = new Map<string, Promise<readonly PinnedAddress[]>>()")
+    );
+    assert!(server.contains("let pinnedSetPromise = DNS_PIN_CACHE.get(cacheKey)"));
+    assert!(server.contains("DNS_PIN_CACHE.set(cacheKey, pinnedSetPromise)"));
+    assert!(server.contains("Object.freeze(addresses.map"));
+    assert!(server.contains("createPinnedLookup"));
+    assert!(server.contains("options.all === true"));
+    assert!(server.contains("callback(null, [{ address: pinned.address"));
+    assert!(server.contains("agent: false"));
+    assert!(server.contains("hostname: logicalHostname"));
+    assert!(server.contains("servername:"));
+    assert!(!server.contains("fetch("));
+    for proxy_env in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
+        assert!(!server.contains(&format!("process.env.{proxy_env}")));
+    }
+}
+
+#[test]
+fn generated_mcp_server_encodes_path_slots_and_rejects_dot_segments() {
+    let recipe = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+
+    assert!(server.contains("\"origin\": \"https://api.example.com\""));
+    assert!(server.contains("\"path_template\": \"/users/${user_id}\""));
+    assert!(server.contains("renderPathTemplate"));
+    assert!(server.contains("encodeURIComponent(value)"));
+    assert!(server.contains("isUnsafePathSlot"));
+    assert!(server.contains("candidate.includes(\"/\")"));
+    assert!(server.contains("candidate.includes(\"\\\\\")"));
+    assert!(server.contains("Rendered path must not contain structural path segments"));
+    assert!(!server.contains("new URL(fillTemplate(RECIPE.url_template"));
+}
+
+#[test]
+fn generated_mcp_server_compiles_and_validates_sanitized_response_schema() {
+    let mut recipe = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    recipe.response_schema = Some(SchemaSpec {
+        name: Some("user".to_string()),
+        schema: json!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": { "type": "string", "example": "secret-example" }
+            }
+        }),
+    });
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&recipe, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+
+    assert!(server.contains("import { Ajv"));
+    assert!(server.contains("ajv.compile"));
+    assert!(server.contains("validateResponseBody"));
+    assert!(server.contains("schema_valid"));
+    assert!(server.contains("validation_errors"));
+    assert!(server.contains("\"required\": ["));
+    assert!(!server.contains("secret-example"));
+}
+
+#[test]
+fn generated_mutating_mcp_tool_requires_deployment_and_call_confirmation() {
+    let mutating = fake_recipe("POST", "https://api.example.com/users/{{user_id}}");
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&mutating, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+
+    assert!(server.contains("\"confirm_mutation\": z.literal(true)"));
+    assert!(server.contains("FIRSTCALL_ALLOW_MUTATING"));
+    assert!(server.contains("args.confirm_mutation !== true"));
+
+    let read_only = fake_recipe("GET", "https://api.example.com/users/{{user_id}}");
+    let out = tempdir().expect("tempdir");
+    export_agent_package(&read_only, out.path()).expect("export");
+    let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
+    assert!(!server.contains("\"confirm_mutation\": z.literal(true)"));
+}
+
+#[test]
+fn generated_mcp_server_serializes_multipart_for_direct_transport() {
     let mut recipe = fake_recipe("POST", "https://api.example.com/upload/{{user_id}}");
     recipe.body_template = BodyTemplate::Multipart {
         fields: vec![KeyValueField {
@@ -268,8 +524,9 @@ fn generated_mcp_server_sends_multipart_as_form_data() {
     export_agent_package(&recipe, out.path()).expect("export");
     let server = fs::read_to_string(out.path().join("mcp-server/src/server.ts")).expect("server");
 
-    assert!(server.contains("new FormData()"));
-    assert!(server.contains("form.append"));
+    assert!(server.contains("renderMultipartBody"));
+    assert!(server.contains("multipart/form-data; boundary=${multipart.boundary}"));
+    assert!(server.contains("Content-Disposition: form-data"));
 }
 
 #[test]
@@ -706,10 +963,13 @@ fn text_only_golden_agent_package_uses_safe_templates() {
     );
     assert!(!lock.contains(RAW_QUERY_SECRET));
     assert!(server.contains("type ToolArgs"));
-    assert!(server.contains("RequestInit"));
+    assert!(server.contains("https.RequestOptions"));
     assert!(server.contains("setDefaultHeader"));
     assert!(server.contains("Buffer.from"));
     assert!(readme.contains("FIRSTCALL_API_KEY"));
+    assert!(readme.contains("pins it for the MCP process lifetime"));
+    assert!(readme.contains("restart the process to refresh DNS"));
+    assert!(readme.contains("do not read proxy environment variables"));
 
     for secret in [
         RAW_SECRET,
@@ -773,6 +1033,7 @@ fn assert_agent_package_files(root: &Path) {
         "policy.json",
         "package.manifest.json",
         "mcp-server/package.json",
+        "mcp-server/package-lock.json",
         "mcp-server/tsconfig.json",
         "mcp-server/src/server.ts",
         "mcp-server/README.md",
@@ -839,6 +1100,7 @@ fn fake_recipe(method: &str, url_template: &str) -> Recipe {
                 confidence: Confidence::High,
             },
         ],
+        response_schema: None,
         last_success_at: Some(verified_time()),
         last_success_status: Some(200),
     }

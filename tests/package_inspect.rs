@@ -211,6 +211,31 @@ fn inspect_package_recipe_tamper_blocks_on_recomputed_fingerprint() {
 }
 
 #[test]
+fn inspect_package_response_schema_tamper_blocks_on_recomputed_fingerprint() {
+    let package = generate_package();
+    edit_recipe_yaml(package.path(), |recipe| {
+        recipe["response_schema"] = json!({
+            "name": "response",
+            "schema": {
+                "type": "object",
+                "required": ["id"],
+                "properties": { "id": { "type": "string" } }
+            }
+        });
+    });
+
+    let report = inspect_agent_package_dir(package.path());
+
+    assert!(!report.is_ready());
+    assert!(
+        report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("response_schema_fingerprint"))
+    );
+}
+
+#[test]
 fn cli_inspect_package_missing_manifest_reports_legacy_blocked() {
     let package = generate_package();
     fs::remove_file(package.path().join("package.manifest.json")).expect("remove manifest");

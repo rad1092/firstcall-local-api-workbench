@@ -21,6 +21,7 @@ dist/sample-agent-tool/
   package.manifest.json
   mcp-server/
     package.json
+    package-lock.json
     tsconfig.json
     src/server.ts
     README.md
@@ -31,9 +32,10 @@ File purposes:
 - `recipe.yaml`: the portable agent recipe description. It contains method, URL template, auth metadata, headers, query parameters, body kind, body template, input slots, verification metadata, and security metadata.
 - `verified.lock.json`: verification lock metadata. It records whether the recipe was verified, the last successful status/time, deterministic fingerprints, redaction policy version, and generator.
 - `skill.md`: concise agent-facing usage notes, safety rules, inputs, environment variables, and last verification information.
-- `policy.json`: static policy constraints for future agent governance, including allowed methods, hosts, paths, secret headers/query keys, confirmation requirements, and response redaction keys.
+- `policy.json`: fail-closed runtime constraints for the generated MCP server, including allowed methods, exact origins, path templates, blocked headers, redirects, response size, confirmation requirements, and response redaction keys.
 - `package.manifest.json`: integrity metadata for generated package files. It records package-relative paths and SHA-256 hashes over raw file bytes.
 - `mcp-server/package.json`: generated TypeScript MCP server package metadata and dependencies.
+- `mcp-server/package-lock.json`: npm lockfile for reproducible `npm ci` installs, including resolved package integrity metadata.
 - `mcp-server/tsconfig.json`: generated TypeScript compiler configuration.
 - `mcp-server/src/server.ts`: generated MCP server template exposing one tool for the recipe.
 - `mcp-server/README.md`: generated MCP server quickstart and environment-variable notes.
@@ -58,6 +60,10 @@ Required top-level fields:
 - `slots`: runtime input slot definitions.
 - `verified`: last successful verification metadata.
 - `security`: secret/redaction metadata.
+
+Optional top-level fields:
+
+- `response_schema`: sanitized response-schema metadata preserved from parsing and local verification. Descriptions and exact-value annotations that could contain secrets are removed before export, including through local `$ref` chains. Its canonical form is covered by `verified.lock.json`.
 
 Compact example:
 
@@ -167,7 +173,7 @@ Required fields:
 - `last_success_at`: RFC3339 timestamp for the last successful local verification.
 - `last_success_status`: HTTP status for the last successful verification. Must be `200..=299`.
 - `request_fingerprint`: SHA-256 over the safe canonical request. Validation and import-readiness recompute it from `recipe.yaml` and require a match.
-- `response_schema_fingerprint`: 64-character lowercase SHA-256-shaped hex string for response schema metadata.
+- `response_schema_fingerprint`: lowercase SHA-256 over the sanitized canonical response schema, or over the explicit no-schema sentinel. Validation and import-readiness recompute it from `recipe.yaml` and require a match.
 - `redaction_policy_version`: redaction policy version used when generating the package.
 - `generator`: generator identifier. Current value is `firstcall`.
 
@@ -197,15 +203,22 @@ Rules:
 
 ## policy.json Schema
 
-`policy.json` constrains what an agent tool package may execute. It is a static governance artifact and should be conservative.
+`policy.json` constrains what the generated MCP tool may execute. The runtime resolves it from the package root, validates it strictly at startup, and fails closed when it is missing, malformed, or inconsistent with the generated recipe.
 
 Required fields:
 
-- `schema_version`: policy schema version. Current value is `1`.
+- `schema_version`: policy schema version. Current value is `2`.
 - `allowed_methods`: non-empty array of allowed HTTP methods.
+- `allowed_origins`: non-empty array of exact HTTP(S) origins, including an effective non-default port when present.
+- `allowed_path_templates`: non-empty array of exported path templates.
 - `allowed_hosts`: non-empty array of allowed hosts.
 - `allowed_paths`: non-empty array of allowed paths.
-- `blocked_headers`: headers that should not be sent.
+- `redirect_policy`: must disable redirects with `mode: "none"` and `max_hops: 0`.
+- `dns_policy`: requires full-answer-set resolution and connection pinning, declares whether loopback/private networks are allowed, and lists address classes that always fail closed.
+- `proxy_policy`: must use direct sockets and ignore proxy environment variables.
+- `timeout_ms`: generated request and response-stream deadline. Current value is `30000`.
+- `max_response_bytes`: hard response-body read limit. Current value is `1048576`.
+- `blocked_headers`: headers the generated request must not control, including hop-by-hop, authority, framing, proxy-authorization, and cookie headers.
 - `secret_headers`: headers treated as secret-bearing.
 - `secret_query_keys`: query keys treated as secret-bearing.
 - `requires_confirmation`: boolean confirmation flag for mutating/destructive calls.
@@ -215,11 +228,45 @@ Compact example:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "allowed_methods": ["GET"],
+  "allowed_origins": ["https://api.example.com"],
+  "allowed_path_templates": ["/users/${user_id}"],
   "allowed_hosts": ["api.example.com"],
   "allowed_paths": ["/users/slot"],
-  "blocked_headers": [],
+  "redirect_policy": {"mode": "none", "max_hops": 0},
+  "dns_policy": {
+    "resolve_all_addresses": true,
+    "pin_connection": true,
+    "allow_loopback": true,
+    "allow_private_networks": true,
+    "blocked_address_classes": ["unspecified", "link_local", "multicast"]
+  },
+  "proxy_policy": {"mode": "direct", "environment_variables": "ignore"},
+  "timeout_ms": 30000,
+  "max_response_bytes": 1048576,
+  "blocked_headers": [
+    "Host",
+    "Content-Length",
+    "Transfer-Encoding",
+    "Connection",
+    "Upgrade",
+    "Proxy-Authorization",
+    "Proxy-Connection",
+    "Keep-Alive",
+    "TE",
+    "Trailer",
+    "Cookie",
+    "Forwarded",
+    "X-Forwarded-Host",
+    "X-Forwarded-Proto",
+    "X-Forwarded-For",
+    "X-Original-URL",
+    "X-Rewrite-URL",
+    "X-HTTP-Method-Override",
+    "X-Method-Override",
+    "X-HTTP-Method"
+  ],
   "secret_headers": [
     "Authorization",
     "Proxy-Authorization",
@@ -248,14 +295,22 @@ Compact example:
 
 Rules:
 
-- `DELETE`, `PUT`, and `PATCH` require confirmation under current policy rules.
-- `POST` requires confirmation when the path appears destructive, for example delete, remove, cancel, refund, or archive style paths.
-- Non-destructive `POST` may remain confirmation-free under current policy rules.
+- Every non-`GET`/`HEAD` method requires both `FIRSTCALL_ALLOW_MUTATING=1` and the tool input `confirm_mutation: true`.
+- Runtime URL construction accepts only HTTP(S), rejects userinfo, fragments, authority placeholders, unsafe literal IP classes, and structural path-slot values. Path slots that decode to a slash, backslash, or dot segment are rejected rather than delegated to proxy-specific decoding behavior.
+- GET/HEAD recipes reject method-override headers and `_method` query/form fields. Authority, framing, proxy-routing, cookie, and method-override headers are blocked in both local verification and generated execution.
+- Automatic redirects are disabled, so a permitted origin cannot redirect execution to a different target.
+- For a DNS hostname, the generated MCP process performs one `dns.lookup` with `all: true` and `verbatim: true`, validates every returned address, and caches that immutable answer set. Concurrent first calls share the same lookup promise, so only one first answer set is adopted.
+- Each socket is connected through a custom lookup callback that returns one already-validated pinned address. The request still uses the original hostname for the HTTP `Host` header and HTTPS TLS SNI.
+- The DNS answer set, including a rejected lookup or rejected address set, remains pinned for the MCP process lifetime. Restart the generated MCP process to refresh DNS or recover after DNS configuration changes. This deliberately trades DNS failover for cross-call rebinding resistance.
+- Generated HTTP(S) uses Node's direct `http`/`https` transport with `agent: false`; it does not read `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or `NO_PROXY`. Proxying must not be inferred from the environment.
+- Local-first policy currently allows loopback and private-network answers, while unspecified, link-local, and multicast answers always fail closed. Deployments that do not need local services should tighten those two allow flags before exposure.
+- Generated requests and response streams are aborted after 30 seconds.
+- Response streaming stops at the configured byte limit and reports `body_truncated` plus `bytes_read`.
 - Current `policy.json` generation parses the source recipe URL with placeholder-safe replacements. Runtime placeholders such as `{{user_id}}` or `${user_id}` are replaced with the parse-safe literal `slot` for `allowed_paths`, so a recipe path like `/users/{{user_id}}` currently becomes `/users/slot`.
 - `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, and `X-API-Key` are treated as secret headers.
 - Common secret query keys include `api_key`, `token`, `secret`, `access_token`, and `refresh_token`.
 - Common response redaction keys include `token`, `secret`, `password`, `api_key`, `access_token`, and `refresh_token`.
-- Import-readiness reconciliation checks `recipe.yaml` and `policy.json` before persistence. `recipe.yaml` preserves exported runtime placeholders while current `policy.json` stores parse-safe paths, so the CLI normalizes placeholders conservatively for method, host, and path checks.
+- Import-readiness reconciliation checks `recipe.yaml`, `policy.json`, the response-schema fingerprint, the manifest, and the npm lockfile before persistence. `recipe.yaml` preserves exported runtime placeholders while the legacy `allowed_paths` field stores parse-safe paths. Legacy schema-version-1 policy files can be statically examined with a warning, but only schema-version-2 generated packages carry the runtime-enforcement contract.
 
 ## package.manifest.json Schema
 
@@ -311,15 +366,19 @@ Current generated MCP server behavior:
 - Accepts slot inputs as tool arguments.
 - Constructs and performs the HTTP request at runtime.
 - Returns text content plus `structuredContent`.
-- Uses `outputSchema` with `status`, `ok`, and `body_preview`.
+- Uses `outputSchema` with `status`, `ok`, `body_preview`, `body_truncated`, `bytes_read`, `schema_valid`, and `validation_errors`.
 - Produces a redacted response preview.
+- Loads and enforces package-root `policy.json` before registering the tool.
+- Uses exact-origin direct HTTP(S) requests, component-encoded path inputs, no redirects, blocked-header checks, process-lifetime DNS pinning, proxy-environment bypass, and bounded response streaming.
+- Compiles the sanitized response schema once with the exact-pinned Ajv runtime and validates every complete response. Truncated or schema-invalid responses return `ok: false`.
+- Requires a process opt-in and per-call confirmation for mutating methods.
 - Includes tool annotations such as `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`.
 
 Tool annotations are advisory hints only. They are not security controls. The real guardrails remain `policy.json`, local verify guards, `validate-package`, no raw secret export, and environment-variable-only secret handling.
 
 Default `validate-package` does not execute:
 
-- `npm install`
+- `npm ci`
 - `npm build`
 - TypeScript compilation
 - Node
@@ -346,10 +405,11 @@ It checks:
 - `recipe.yaml` security metadata.
 - 2xx verified semantics in `recipe.yaml`.
 - `verified.lock.json` verified metadata and request fingerprint match against `recipe.yaml`.
+- Sanitized `response_schema` shape and response-schema fingerprint match against `verified.lock.json`.
 - Secret leak markers and high-confidence bearer/API-key/password-like values.
 - `policy.json` shape and confirmation requirements.
 - MCP template markers, including structured output and annotations.
-- `mcp-server/package.json` and `mcp-server/tsconfig.json` shape.
+- Exact `mcp-server/package.json` dependency versions (including Ajv), package-manager pin, `package-lock.json` v3 root agreement, every direct dependency entry/version, decoded SHA-512 integrity metadata, and `mcp-server/tsconfig.json` shape.
 - Manifest paths and hashes when `package.manifest.json` is present.
 
 Maintainers may opt into a local generated MCP compile smoke with `firstcall-cli validate-package --dir PATH --mcp-compile-smoke`. The smoke checks `mcp-server/package.json`, `mcp-server/tsconfig.json`, `mcp-server/src/server.ts`, and then uses the local `mcp-server/node_modules` TypeScript compiler with `--noEmit` if it is already installed. It does not install dependencies, does not use `npx`, does not run MCP Inspector, does not execute the generated server, does not send HTTP, does not read secrets, and does not certify runtime behavior. Missing `node_modules` or missing local TypeScript is reported as a warning; a local TypeScript compile failure is a validation error.
@@ -358,7 +418,7 @@ It does not check by default:
 
 - Live API availability.
 - HTTP execution.
-- npm installation.
+- npm installation or audit execution.
 - TypeScript compilation.
 - Node execution.
 - MCP Inspector.
@@ -407,6 +467,7 @@ Secret values must not be written to:
 - `package.manifest.json`
 - `skill.md`
 - `mcp-server/package.json`
+- `mcp-server/package-lock.json`
 - `mcp-server/tsconfig.json`
 - `mcp-server/src/server.ts`
 - `mcp-server/README.md`
@@ -514,7 +575,7 @@ Current CLI import decisions and future desktop import considerations:
 - Raw secrets must never be imported.
 - Imported auth must remain environment-variable-backed.
 - If `policy.json` and `recipe.yaml` disagree, import should block.
-- Full request fingerprint recomputation is deferred, but malformed `verified.lock.json` fingerprint fields block readiness.
+- Request and sanitized response-schema fingerprints are recomputed; mismatches with `verified.lock.json` block readiness.
 - Generated `mcp-server/` files should be treated as artifacts, not source of truth.
 - Import should not execute HTTP.
 - Import should not run npm, TypeScript, Node, MCP Inspector, or generated MCP runtime.
@@ -536,6 +597,7 @@ Open questions:
 
 - Whether future import should record package provenance in SQLite.
 - Whether legacy packages without `package.manifest.json` should be importable behind an explicit flag.
+- When to remove the schema-version-1 policy and missing-npm-lock compatibility warnings entirely.
 - Whether future `recipe-export-json` should expose only safe/redacted recipe fields.
 
 ## Adjacent Work

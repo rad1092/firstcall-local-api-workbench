@@ -9,6 +9,7 @@ use crate::model::{BodyTemplate, HeaderField, KeyValueField, Outcome, SlotLocati
 impl FirstCallApp {
     pub(crate) fn render_new_attempt(&mut self, root_ui: &mut egui::Ui) {
         let is_running = self.is_running();
+        let http_execution_available = self.http_execution_available();
         egui::Panel::left("new_attempt_inputs")
             .resizable(true)
             .default_size(360.0)
@@ -89,8 +90,13 @@ impl FirstCallApp {
             .default_size(380.0)
             .show_inside(root_ui, |ui| {
                 ui.heading("Run");
-                if let Some(draft) = self.working_draft.as_ref() {
-                    let missing_required = self.missing_required_slot_count(draft);
+                let missing_required = self
+                    .working_draft
+                    .as_ref()
+                    .map(|draft| self.missing_required_slot_count(draft));
+                if let (Some(draft), Some(missing_required)) =
+                    (self.working_draft.as_ref(), missing_required)
+                {
                     ui.label(format!("Auth: {}", draft.auth.label()));
                     let missing_text = format!("Missing required slots: {missing_required}");
                     if missing_required > 0 {
@@ -213,7 +219,10 @@ impl FirstCallApp {
                     }
 
                     if ui
-                        .add_enabled(!is_running, egui::Button::new("Run Request"))
+                        .add_enabled(
+                            !is_running && http_execution_available && missing_required == Some(0),
+                            egui::Button::new("Run Request"),
+                        )
                         .clicked()
                     {
                         self.run_current_draft();

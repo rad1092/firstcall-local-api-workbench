@@ -5,6 +5,7 @@ use crate::app::FirstCallApp;
 impl FirstCallApp {
     pub(crate) fn render_attempts(&mut self, root_ui: &mut egui::Ui) {
         let is_running = self.is_running();
+        let http_execution_available = self.http_execution_available();
         egui::Panel::left("attempts_list")
             .resizable(true)
             .default_size(390.0)
@@ -49,7 +50,10 @@ impl FirstCallApp {
                                     self.reopen_attempt(attempt.id);
                                 }
                                 if ui
-                                    .add_enabled(!is_running, egui::Button::new("Retry"))
+                                    .add_enabled(
+                                        !is_running && http_execution_available,
+                                        egui::Button::new("Retry"),
+                                    )
                                     .clicked()
                                 {
                                     self.reopen_attempt(attempt.id);

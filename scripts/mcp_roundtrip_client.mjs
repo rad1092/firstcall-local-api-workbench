@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 function usage() {
   return `Usage:
-  node scripts/mcp_roundtrip_client.mjs --package-dir PATH --tool NAME --args JSON
+  node scripts/mcp_roundtrip_client.mjs --package-dir PATH --tool NAME (--args JSON | --args-file PATH) [--expect-not-ok]
 
 Runs a generated FirstCall MCP server from PATH, lists tools, calls one tool,
-and exits non-zero unless the call returns structuredContent.ok=true.`;
+and exits non-zero unless the call's structuredContent.ok matches the expectation.`;
 }
 
 function requiredArg(args, name) {
@@ -18,6 +19,11 @@ function requiredArg(args, name) {
     throw new Error(`missing ${name}\n\n${usage()}`);
   }
   return args[index + 1];
+}
+
+function optionalArg(args, name) {
+  const index = args.indexOf(name);
+  return index === -1 ? undefined : args[index + 1];
 }
 
 async function importFromPackage(packageDir, specifier) {
@@ -35,9 +41,17 @@ const packageDir = path.resolve(requiredArg(args, "--package-dir"));
 const toolName = requiredArg(args, "--tool");
 let toolArgs;
 try {
-  toolArgs = JSON.parse(requiredArg(args, "--args"));
+  const inlineArgs = optionalArg(args, "--args");
+  const argsFile = optionalArg(args, "--args-file");
+  if ((inlineArgs === undefined) === (argsFile === undefined)) {
+    throw new Error("provide exactly one of --args or --args-file");
+  }
+  const rawArgs = argsFile === undefined
+    ? inlineArgs
+    : readFileSync(path.resolve(argsFile), "utf8");
+  toolArgs = JSON.parse(rawArgs);
 } catch (error) {
-  throw new Error(`--args must be valid JSON: ${error.message}`);
+  throw new Error(`tool args must be valid JSON: ${error.message}`);
 }
 
 const serverPath = path.join(packageDir, "dist", "server.js");
@@ -65,11 +79,17 @@ try {
     throw new Error(`generated MCP tool not found: ${toolName}`);
   }
   const result = await client.callTool({ name: toolName, arguments: toolArgs });
+  if (args.includes("--debug-result")) {
+    console.error(JSON.stringify(result, null, 2));
+  }
   const structured = result.structuredContent ?? {};
   const ok = structured.ok === true;
+  const expectedOk = !args.includes("--expect-not-ok");
   const status = structured.status;
-  if (!ok) {
-    throw new Error(`generated MCP tool returned ok=${structured.ok} status=${status}`);
+  if (ok !== expectedOk) {
+    throw new Error(
+      `generated MCP tool returned ok=${structured.ok} status=${status}; expected ok=${expectedOk}`,
+    );
   }
   console.log(
     JSON.stringify(
@@ -77,6 +97,10 @@ try {
         mcp_roundtrip: "passed",
         tool: toolName,
         status,
+        ok,
+        body_truncated: structured.body_truncated,
+        schema_valid: structured.schema_valid,
+        validation_errors: structured.validation_errors,
         listed_tools: tools.tools.map((tool) => tool.name),
       },
       null,

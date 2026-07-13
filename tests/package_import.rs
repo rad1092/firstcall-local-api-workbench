@@ -4,7 +4,7 @@ use std::process::Command;
 
 use firstcall::export::agent_package::export_agent_package;
 use firstcall::export::package_import::import_agent_package_dir;
-use firstcall::model::{AuthStyle, BodyTemplate, Confidence, KeyValueField, Recipe};
+use firstcall::model::{AuthStyle, BodyTemplate, Confidence, KeyValueField, Recipe, SchemaSpec};
 use firstcall::store::db::{AppPaths, open_database};
 use firstcall::store::repos::AppRepository;
 use serde_json::{Value, json};
@@ -125,6 +125,37 @@ fn cli_import_package_json_imports_recipe_into_temp_sqlite() {
 }
 
 #[test]
+fn import_preserves_sanitized_response_schema_but_clears_verification() {
+    let mut recipe = fixture_recipe();
+    recipe.response_schema = Some(SchemaSpec {
+        name: Some("response".to_string()),
+        schema: json!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": { "type": "string" },
+                "token": {
+                    "type": "string",
+                    "default": "must_not_be_exported",
+                    "enum": ["must_not_be_exported"]
+                }
+            }
+        }),
+    });
+    let package = package_for_recipe(&recipe);
+    let storage = tempdir().expect("storage tempdir");
+
+    let imported = import_single_recipe(package.path(), storage.path());
+
+    assert!(imported.last_success_at.is_none());
+    assert!(imported.last_success_status.is_none());
+    let schema = imported.response_schema.expect("response schema");
+    let serialized = serde_json::to_string(&schema).expect("schema json");
+    assert!(serialized.contains("\"id\""));
+    assert!(!serialized.contains("must_not_be_exported"));
+}
+
+#[test]
 fn import_preserves_text_and_form_body_kinds() {
     let mut text_recipe = fixture_recipe();
     text_recipe.body_template = BodyTemplate::Text {
@@ -197,6 +228,40 @@ fn missing_manifest_blocks_import_before_sqlite_write() {
         !paths.db_path.exists(),
         "blocked import should not create sqlite database"
     );
+}
+
+#[test]
+fn policy_v2_missing_npm_lock_and_manifest_entry_blocks_import() {
+    let package = generate_package();
+    fs::remove_file(package.path().join("mcp-server/package-lock.json"))
+        .expect("remove package lock");
+    let manifest_path = package.path().join("package.manifest.json");
+    let mut manifest = read_json(&manifest_path);
+    manifest["files"]
+        .as_array_mut()
+        .expect("manifest files")
+        .retain(|entry| entry["path"] != "mcp-server/package-lock.json");
+    fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).expect("manifest json"),
+    )
+    .expect("write manifest");
+    let storage = tempdir().expect("storage tempdir");
+    let paths = AppPaths::from_root(&storage.path().join("data"), &storage.path().join("config"))
+        .expect("paths");
+
+    let report = import_agent_package_dir(package.path(), &paths).expect("import report");
+
+    assert!(!report.imported());
+    assert!(
+        report
+            .inspect_report
+            .validation
+            .errors
+            .iter()
+            .any(|error| error.contains("package-lock.json"))
+    );
+    assert!(!paths.db_path.exists());
 }
 
 #[test]

@@ -10,12 +10,24 @@ use super::agent_common::GENERATOR;
 
 pub(crate) const MANIFEST_FILE: &str = "package.manifest.json";
 
+pub(crate) const LEGACY_MANIFESTED_FILES: &[&str] = &[
+    "recipe.yaml",
+    "verified.lock.json",
+    "skill.md",
+    "policy.json",
+    "mcp-server/package.json",
+    "mcp-server/tsconfig.json",
+    "mcp-server/src/server.ts",
+    "mcp-server/README.md",
+];
+
 pub(crate) const MANIFESTED_FILES: &[&str] = &[
     "recipe.yaml",
     "verified.lock.json",
     "skill.md",
     "policy.json",
     "mcp-server/package.json",
+    "mcp-server/package-lock.json",
     "mcp-server/tsconfig.json",
     "mcp-server/src/server.ts",
     "mcp-server/README.md",

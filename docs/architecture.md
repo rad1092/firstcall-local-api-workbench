@@ -29,6 +29,6 @@ The GUI calls shared core logic directly. It must not parse CLI stdout or shell 
 ## Packages And Fixtures
 
 - `fixtures/*`: sample request and recipe inputs used by tests and manual checks.
-- Generated agent package directories contain `recipe.yaml`, `skill.md`, `policy.json`, `verified.lock.json`, `package.manifest.json`, and `mcp-server/` template artifacts.
+- Generated agent package directories contain `recipe.yaml`, `skill.md`, `policy.json`, `verified.lock.json`, `package.manifest.json`, and `mcp-server/` artifacts. The MCP directory includes exact dependency versions and `package-lock.json`; the generated runtime loads and enforces package-root policy rather than treating it as documentation only. Its direct Node HTTP(S) transport validates the complete initial DNS answer set, pins it for the MCP process lifetime, preserves the logical Host/TLS SNI, and ignores proxy environment variables. DNS changes and cached lookup failures refresh only after process restart.
 
 Generated `mcp-server/` files are artifacts. They are not source of truth for package import.

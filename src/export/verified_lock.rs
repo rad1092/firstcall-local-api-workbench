@@ -3,6 +3,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::exec::redact::sanitize_response_schema;
 use crate::model::Recipe;
 
 use super::agent_common::{GENERATOR, has_successful_verification, safe_canonical_recipe};
@@ -31,7 +32,7 @@ pub fn recipe_to_verified_lock_json(recipe: &Recipe) -> Result<String> {
             .unwrap_or_else(|| "unverified".to_string()),
         last_success_status: recipe.last_success_status.unwrap_or_default(),
         request_fingerprint: request_fingerprint_for_recipe(recipe)?,
-        response_schema_fingerprint: sha256_hex("no_response_schema"),
+        response_schema_fingerprint: response_schema_fingerprint_for_recipe(recipe)?,
         redaction_policy_version: 1,
         generator: GENERATOR.to_string(),
     };
@@ -65,6 +66,28 @@ pub fn request_fingerprint_for_agent_recipe_yaml(value: &Value) -> Result<String
     });
     let canonical = serde_json::to_string(&canonical)?;
     Ok(sha256_hex(&canonical))
+}
+
+pub fn response_schema_fingerprint_for_recipe(recipe: &Recipe) -> Result<String> {
+    match recipe.response_schema.as_ref() {
+        Some(schema) => {
+            let sanitized = sanitize_response_schema(schema);
+            Ok(sha256_hex(&serde_json::to_string(&sanitized)?))
+        }
+        None => Ok(sha256_hex("no_response_schema")),
+    }
+}
+
+pub fn response_schema_fingerprint_for_agent_recipe_yaml(value: &Value) -> Result<String> {
+    let Some(schema) = value.get("response_schema") else {
+        return Ok(sha256_hex("no_response_schema"));
+    };
+    if schema.is_null() {
+        return Ok(sha256_hex("no_response_schema"));
+    }
+    let schema = serde_json::from_value(schema.clone())?;
+    let sanitized = sanitize_response_schema(&schema);
+    Ok(sha256_hex(&serde_json::to_string(&sanitized)?))
 }
 
 fn sha256_hex(input: &str) -> String {

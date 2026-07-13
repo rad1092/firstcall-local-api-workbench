@@ -13,10 +13,23 @@ cargo fmt --all -- --check
 Core checks:
 
 ```powershell
-cargo clippy --all-targets --all-features -- -D warnings
+cargo audit --deny unsound --deny yanked
+cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 cargo build --locked
 ```
+
+CI pins `cargo-audit` itself to 0.22.2 in an isolated runner-temporary root, but
+temporarily installs it without the
+tool crate's published `--locked` graph. That published graph contains newly
+advised transitive versions; compatible re-resolution currently produces a
+clean audit tool. Restore `--locked` when a cargo-audit release ships a safe
+lockfile.
+
+`wayland-scanner` 0.31.10 is temporarily patched through
+`third_party/wayland-scanner-0.31.10`. The directory is the crates.io release
+source with only the upstream `quick-xml` 0.41 compatibility changes. Remove the
+path patch as soon as a fixed crates.io release is available.
 
 CLI-only build check:
 
@@ -42,6 +55,7 @@ cargo test --locked --test recipe_cli
 cargo test --locked --test package_validation
 cargo test --locked --test package_inspect
 cargo test --locked --test package_import
+cargo test --locked --test gui_interactions
 ```
 
 ## Real Local And Live Checks
@@ -69,7 +83,8 @@ $env:FIRSTCALL_BEARER_TOKEN = gh auth token
 cargo run --locked --bin firstcall-cli -- verify --recipe-json fixtures/github-user-recipe.json --json --out ./tmp/github-user.verified.json --lock-out ./tmp/github-user.lock.json
 cargo run --locked --bin firstcall-cli -- package --recipe-json ./tmp/github-user.verified.json --out ./tmp/github-user-agent-tool
 Push-Location ./tmp/github-user-agent-tool/mcp-server
-npm install
+npm ci --ignore-scripts
+npm audit --audit-level=high
 npm run build
 Pop-Location
 node ./scripts/mcp_roundtrip_client.mjs --package-dir ./tmp/github-user-agent-tool/mcp-server --tool github_authenticated_user --args "{}"
@@ -102,8 +117,8 @@ server.
 
 ## Binary Release Assets
 
-The release binary workflow should produce deterministic assets for each
-published tag:
+The release binary workflow should produce versioned, provenance-attested assets
+for each published tag:
 
 - `firstcall-<tag>-x86_64-pc-windows-msvc.zip`
 - `firstcall-<tag>-x86_64-unknown-linux-gnu.tar.gz`
@@ -112,13 +127,26 @@ published tag:
 - `SHA256SUMS.txt`
 
 Each archive should include both `firstcall` and `firstcall-cli`, plus a short
-release README. Backfilled releases should keep the existing tag in place and
-upload deterministic assets with `--clobber`.
+release README. Release assets are append-once: the workflow creates a draft,
+uploads and counts every asset, and only then publishes it. It must never replace
+an existing release or use `--clobber`. Enable immutable releases in the GitHub
+repository settings so the published tag and assets cannot be changed.
+
+Configure the `release` GitHub Environment with required reviewers; naming an
+environment in YAML alone is not an approval gate. Artifact attestations prove
+GitHub Actions provenance, but do not replace Windows Authenticode signing or
+macOS signing and notarization. Those platform trust signals remain a separate
+release capability.
+
+If a run fails after creating its draft, inspect and delete that incomplete
+draft before retrying. The workflow intentionally refuses to reuse or overwrite
+an existing release.
 
 After a release workflow run, verify:
 
 ```powershell
 gh release view <tag> --repo rad1092/firstcall-local-api-workbench --json assets,url
+gh attestation verify <downloaded-archive> --repo rad1092/firstcall-local-api-workbench
 ```
 
 Download at least one archive and run the packaged CLI:

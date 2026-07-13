@@ -78,11 +78,11 @@ The generated package includes:
 - `policy.json`
 - `verified.lock.json`
 - `package.manifest.json`
-- `mcp-server/` with a TypeScript MCP server template
+- `mcp-server/` with a TypeScript MCP server, exact dependency versions, and `package-lock.json`
 
 Raw secrets are never exported. Secret values are represented as environment variable references such as `FIRSTCALL_BEARER_TOKEN` or `FIRSTCALL_API_KEY`.
 
-Generated `mcp-server/` files are template artifacts. They are not source of truth for package import. Static package validation does not install Node dependencies or execute generated MCP code; the CI lifecycle workflow runs a separate generated MCP round-trip after package export.
+Generated `mcp-server/` files are runtime artifacts. They are not source of truth for package import. Static package validation does not install Node dependencies or execute generated MCP code; the CI lifecycle workflow uses `npm ci --ignore-scripts`, audits and builds the locked tree, then runs successful and response-schema-rejected generated MCP calls after package export.
 
 ## Validate, Inspect, And Import
 
@@ -98,7 +98,7 @@ Run static validation:
 cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool --json
 ```
 
-`validate-package` checks package structure, schema metadata, lock metadata, policy shape, MCP template markers, obvious secret leaks, and manifest hashes when present. It does not execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, execute the generated MCP server, import recipes, or modify files.
+`validate-package` checks package structure, recipe and response-schema metadata, lock metadata, policy shape, MCP template markers, exact npm dependency versions, npm lockfile integrity metadata, obvious secret leaks, and manifest hashes when present. It does not execute HTTP, run npm, compile TypeScript, run Node, run MCP Inspector, execute the generated MCP server, import recipes, or modify files. Legacy packages without an npm lockfile remain readable with a warning; newly generated packages require the lockfile through their manifest.
 
 Maintainers with local Node dependencies already installed can request optional compile smoke:
 
@@ -106,7 +106,7 @@ Maintainers with local Node dependencies already installed can request optional 
 cargo run --bin firstcall-cli -- validate-package --dir ./dist/sample-agent-tool --mcp-compile-smoke
 ```
 
-`--mcp-compile-smoke` uses local `mcp-server/node_modules` when present. It does not run `npm install`, use `npx`, run MCP Inspector, execute the generated server, send HTTP, or read secrets. Missing `node_modules` is reported as a warning.
+`--mcp-compile-smoke` uses local `mcp-server/node_modules` when present. It does not run `npm install` or `npm ci`, use `npx`, run MCP Inspector, execute the generated server, send HTTP, or read secrets. Missing `node_modules` is reported as a warning.
 
 Inspect import-readiness:
 
