@@ -94,16 +94,10 @@ The CLI-first lifecycle expected for a release candidate is:
 8. Validate and inspect the re-exported package.
 
 `tests/lifecycle_cli.rs` covers this flow with local temp files, temp SQLite storage, and loopback HTTP only.
-The CLI lifecycle GitHub Actions workflow also runs this storage-backed flow
-through actual `verify --recipe-id` against a local loopback server and then
-validates the re-exported package. It also installs generated MCP dependencies,
-builds the generated server, and calls the generated tool against the loopback
-server.
 
 ## Binary Release Assets
 
-The release binary workflow should produce deterministic assets for each
-published tag:
+Each published tag should provide deterministic assets:
 
 - `firstcall-<tag>-x86_64-pc-windows-msvc.zip`
 - `firstcall-<tag>-x86_64-unknown-linux-gnu.tar.gz`
@@ -115,7 +109,7 @@ Each archive should include both `firstcall` and `firstcall-cli`, plus a short
 release README. Backfilled releases should keep the existing tag in place and
 upload deterministic assets with `--clobber`.
 
-After a release workflow run, verify:
+After publishing a release, verify:
 
 ```powershell
 gh release view <tag> --repo rad1092/firstcall-local-api-workbench --json assets,url

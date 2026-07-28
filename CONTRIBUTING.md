@@ -53,6 +53,5 @@ cargo run --locked --bin firstcall-cli --no-default-features -- version
 Before cutting or backfilling a release, run the release-readiness checks in
 [docs/release-readiness.md](docs/release-readiness.md).
 
-Binary releases are built by `.github/workflows/release-binaries.yml`. Release
-assets should include both `firstcall` and `firstcall-cli` for each supported
-target, plus `SHA256SUMS.txt`.
+Release assets should include both `firstcall` and `firstcall-cli` for each
+supported target, plus `SHA256SUMS.txt`.
