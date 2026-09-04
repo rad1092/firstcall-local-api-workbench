@@ -743,7 +743,7 @@ fn pick_server_url(
     if let Some(url) = &base_url {
         collect_slots_from_template(slots, url, SlotLocation::Path, true, "Server variable");
     }
-    base_url.and_then(|url| if url == "/" { None } else { Some(url) })
+    base_url.filter(|url| url != "/")
 }
 
 fn server_url_template(server: &Server) -> String {

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -12,6 +13,10 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::exec::client::{build_http_client, execute_request};
 use crate::exec::redact::{
     redact_draft_for_storage, redact_free_text, redact_request, redact_response,
+};
+use crate::export::native_package::{
+    NativeExportOptions, NativePackageExport, NativeToolDefinition, default_tool_definition,
+    export_native_mcp_package_with_options,
 };
 use crate::export::{curl::recipe_to_curl, json::recipe_to_json, markdown::recipe_to_markdown};
 use crate::merge::merge_parsed_sources;
@@ -28,7 +33,107 @@ use crate::store::db::{AppPaths, open_database};
 use crate::store::migrations::run_migrations;
 use crate::store::repos::AppRepository;
 use crate::store::secrets::{SecretStore, SecretStoreStatus, default_secret_store};
-use crate::util::{SAMPLE_CURL, SAMPLE_DOCS, SAMPLE_OPENAPI};
+use crate::util::SAMPLE_DOCS;
+
+const PUBLIC_SAMPLE_CURL: &str = r#"curl 'https://api.github.com/repos/{{owner}}/{{repository}}' \
+  -H 'User-Agent: FirstCall' \
+  -H 'Accept: application/vnd.github+json'"#;
+
+const PUBLIC_SAMPLE_OPENAPI: &str = r#"openapi: 3.0.3
+info:
+  title: Public GitHub repository lookup
+  version: 1.0.0
+servers:
+  - url: https://api.github.com
+paths:
+  /repos/{owner}/{repository}:
+    get:
+      operationId: getRepository
+      summary: Read a public GitHub repository
+      parameters:
+        - in: path
+          name: owner
+          required: true
+          description: GitHub user or organization that owns the repository
+          schema:
+            type: string
+        - in: path
+          name: repository
+          required: true
+          description: Repository name without the owner prefix
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Repository description, language, stars, and latest activity
+"#;
+
+pub fn configure_theme(ctx: &egui::Context) {
+    use egui::{Color32, CornerRadius, FontId, Margin, Stroke, TextStyle, Vec2};
+    let navy = Color32::from_rgb(24, 42, 67);
+    let blue = Color32::from_rgb(37, 87, 187);
+    let line = Color32::from_rgb(213, 222, 235);
+    let mut style = (*ctx.global_style()).clone();
+    style
+        .text_styles
+        .insert(TextStyle::Heading, FontId::proportional(23.0));
+    style
+        .text_styles
+        .insert(TextStyle::Body, FontId::proportional(16.0));
+    style
+        .text_styles
+        .insert(TextStyle::Button, FontId::proportional(15.0));
+    style
+        .text_styles
+        .insert(TextStyle::Small, FontId::proportional(14.0));
+    style
+        .text_styles
+        .insert(TextStyle::Monospace, FontId::monospace(14.0));
+    style.spacing.item_spacing = Vec2::new(10.0, 10.0);
+    style.spacing.button_padding = Vec2::new(14.0, 9.0);
+    style.spacing.interact_size.y = 38.0;
+    style.spacing.window_margin = Margin::same(20);
+    style.spacing.text_edit_width = 260.0;
+    style.visuals = egui::Visuals::light();
+    style.visuals.override_text_color = Some(navy);
+    style.visuals.weak_text_color = Some(Color32::from_rgb(91, 108, 133));
+    style.visuals.panel_fill = Color32::from_rgb(247, 249, 253);
+    style.visuals.window_fill = Color32::WHITE;
+    style.visuals.extreme_bg_color = Color32::WHITE;
+    style.visuals.faint_bg_color = Color32::from_rgb(240, 244, 250);
+    style.visuals.window_stroke = Stroke::new(1.0_f32, line);
+    style.visuals.selection.bg_fill = Color32::from_rgb(222, 233, 252);
+    style.visuals.selection.stroke = Stroke::new(1.0_f32, blue);
+    style.visuals.hyperlink_color = blue;
+    style.visuals.warn_fg_color = Color32::from_rgb(153, 88, 15);
+    style.visuals.error_fg_color = Color32::from_rgb(173, 44, 56);
+    for visuals in [
+        &mut style.visuals.widgets.noninteractive,
+        &mut style.visuals.widgets.inactive,
+        &mut style.visuals.widgets.hovered,
+        &mut style.visuals.widgets.active,
+        &mut style.visuals.widgets.open,
+    ] {
+        visuals.corner_radius = CornerRadius::same(7);
+        visuals.bg_stroke = Stroke::new(1.0_f32, line);
+        visuals.fg_stroke = Stroke::new(1.0_f32, navy);
+    }
+    style.visuals.widgets.inactive.bg_fill = Color32::WHITE;
+    style.visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(239, 244, 252);
+    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(230, 239, 253);
+    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(226, 236, 252);
+    style.visuals.widgets.hovered.bg_stroke =
+        Stroke::new(1.0_f32, Color32::from_rgb(141, 171, 220));
+    style.visuals.widgets.active.bg_fill = Color32::from_rgb(216, 230, 250);
+    ctx.set_global_style(style);
+}
+
+pub(crate) fn primary_button(label: &str) -> egui::Button<'_> {
+    egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE))
+        .fill(egui::Color32::from_rgb(37, 87, 187))
+        .stroke(egui::Stroke::NONE)
+        .min_size(egui::vec2(0.0, 40.0))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TopScreen {
@@ -126,7 +231,7 @@ impl InputTab {
     }
 
     pub fn has_sample(self) -> bool {
-        matches!(self, Self::Curl | Self::Docs | Self::OpenApi)
+        matches!(self, Self::Curl | Self::OpenApi)
     }
 }
 
@@ -192,6 +297,13 @@ struct RunningExecution {
     source_inputs_snapshot: Vec<SourceInput>,
 }
 
+#[derive(Clone, Debug)]
+pub struct NativeToolEditor {
+    pub recipe_id: i64,
+    pub definition: NativeToolDefinition,
+    pub allow_mutating: bool,
+}
+
 pub struct FirstCallApp {
     pub screen: TopScreen,
     pub inputs: InputBuffers,
@@ -205,6 +317,8 @@ pub struct FirstCallApp {
     pub selected_attempt_id: Option<i64>,
     pub recipes: Vec<RecipeListItem>,
     pub recipe_search: String,
+    pub tool_editor: Option<NativeToolEditor>,
+    pub last_native_export: Option<NativePackageExport>,
     pub auth_slot_inputs: BTreeMap<String, String>,
     pub settings: AppSettings,
     pub paths: AppPaths,
@@ -255,6 +369,8 @@ impl FirstCallApp {
             selected_attempt_id: None,
             recipes,
             recipe_search: String::new(),
+            tool_editor: None,
+            last_native_export: None,
             auth_slot_inputs: BTreeMap::new(),
             settings,
             paths,
@@ -283,6 +399,42 @@ impl FirstCallApp {
         self.clear_completed_execution_state();
         self.parsed_sources = parse_input_buffers(&self.inputs);
         self.candidate_drafts = merge_parsed_sources(&self.parsed_sources);
+        if self.inputs.curl == PUBLIC_SAMPLE_CURL || self.inputs.openapi == PUBLIC_SAMPLE_OPENAPI {
+            for draft in &mut self.candidate_drafts {
+                if draft.base_url.as_deref() == Some("https://api.github.com") {
+                    draft.name = "Read a public GitHub repository".to_string();
+                    for slot in &mut draft.slots {
+                        match slot.name.as_str() {
+                            "owner" => {
+                                slot.current_value = Some("octocat".to_string());
+                                slot.description =
+                                    "GitHub user or organization that owns the repository"
+                                        .to_string();
+                            }
+                            "repository" => {
+                                slot.current_value = Some("Hello-World".to_string());
+                                slot.description =
+                                    "Repository name without the owner prefix".to_string();
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !draft
+                        .headers
+                        .iter()
+                        .any(|header| header.key.eq_ignore_ascii_case("user-agent"))
+                    {
+                        draft.headers.push(crate::model::HeaderField {
+                            key: "User-Agent".to_string(),
+                            value: "FirstCall".to_string(),
+                            required: true,
+                            description: "Identifies this public API example".to_string(),
+                            confidence: crate::model::Confidence::High,
+                        });
+                    }
+                }
+            }
+        }
         self.selected_candidate = if self.candidate_drafts.is_empty() {
             None
         } else {
@@ -341,9 +493,9 @@ impl FirstCallApp {
             return;
         }
         match self.inputs.active_tab {
-            InputTab::Curl => self.inputs.curl = SAMPLE_CURL.to_string(),
+            InputTab::Curl => self.inputs.curl = PUBLIC_SAMPLE_CURL.to_string(),
             InputTab::Docs => self.inputs.docs = SAMPLE_DOCS.to_string(),
-            InputTab::OpenApi => self.inputs.openapi = SAMPLE_OPENAPI.to_string(),
+            InputTab::OpenApi => self.inputs.openapi = PUBLIC_SAMPLE_OPENAPI.to_string(),
             InputTab::PostmanCollection
             | InputTab::Har
             | InputTab::HttpFile
@@ -513,9 +665,9 @@ impl FirstCallApp {
 
         let recipe = recipe_from_executed_draft(draft, result);
         match self.repository.insert_recipe(&recipe) {
-            Ok(_) => {
+            Ok(id) => {
                 self.refresh_lists();
-                self.status_message = Some("Recipe saved".to_string());
+                self.prepare_native_tool(id);
             }
             Err(error) => {
                 self.status_message = Some(format!("Could not save recipe: {error}"));
@@ -534,6 +686,115 @@ impl FirstCallApp {
                 self.status_message = Some("Recipe curl copied to clipboard".to_string());
             }
             Err(error) => self.status_message = Some(format!("Could not copy curl: {error}")),
+        }
+    }
+
+    pub fn prepare_native_tool(&mut self, id: i64) {
+        if self.context_change_blocked_while_running() {
+            return;
+        }
+        match self.repository.get_recipe(id) {
+            Ok(Some(recipe)) if crate::export::agent_package::is_agent_export_eligible(&recipe) => {
+                self.tool_editor = Some(NativeToolEditor {
+                    recipe_id: id,
+                    definition: default_tool_definition(&recipe),
+                    allow_mutating: false,
+                });
+                self.last_native_export = None;
+                self.screen = TopScreen::Recipes;
+                self.status_message = Some(
+                    "Request verified. Describe the tool, then export its connection package."
+                        .to_string(),
+                );
+            }
+            Ok(Some(_)) => {
+                self.status_message =
+                    Some("Run this request successfully before creating an MCP tool.".to_string())
+            }
+            Ok(None) => self.status_message = Some("Saved request not found.".to_string()),
+            Err(error) => {
+                self.status_message = Some(format!("Could not open saved request: {error}"))
+            }
+        }
+    }
+
+    pub fn export_native_tool_to(
+        &mut self,
+        out_dir: &Path,
+        cli_path: &Path,
+    ) -> anyhow::Result<NativePackageExport> {
+        if self.is_running() {
+            anyhow::bail!("Wait for the current request to finish before exporting");
+        }
+        let editor = self
+            .tool_editor
+            .as_ref()
+            .context("Choose a verified request first")?;
+        let recipe = self
+            .repository
+            .get_recipe(editor.recipe_id)?
+            .context("Saved request not found")?;
+        let exported = export_native_mcp_package_with_options(
+            &recipe,
+            out_dir,
+            &editor.definition,
+            cli_path,
+            NativeExportOptions {
+                allow_mutating: editor.allow_mutating,
+            },
+        )?;
+        self.last_native_export = Some(exported.clone());
+        self.tool_editor = None;
+        self.status_message = Some(
+            "MCP package exported and validated. Connect it in your AI client's settings."
+                .to_string(),
+        );
+        Ok(exported)
+    }
+
+    pub(crate) fn choose_native_export_folder(&mut self) {
+        let Some(editor) = self.tool_editor.as_ref() else {
+            return;
+        };
+        let Some(parent) = rfd::FileDialog::new()
+            .set_title("Choose where to save the MCP tool folder")
+            .pick_folder()
+        else {
+            return;
+        };
+        let destination = parent.join(&editor.definition.name);
+        let cli_path = std::env::current_exe().map(|path| {
+            path.with_file_name(if cfg!(windows) {
+                "firstcall-cli.exe"
+            } else {
+                "firstcall-cli"
+            })
+        });
+        match cli_path
+            .context("Could not find the FirstCall installation")
+            .and_then(|path| self.export_native_tool_to(&destination, &path))
+        {
+            Ok(_) => {}
+            Err(error) => self.status_message = Some(format!("Could not export MCP tool: {error}")),
+        }
+    }
+
+    pub(crate) fn open_native_export_folder(&mut self) {
+        let Some(exported) = &self.last_native_export else {
+            return;
+        };
+        let program = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(windows) {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        if let Err(error) = std::process::Command::new(program)
+            .arg(&exported.directory)
+            .spawn()
+        {
+            self.status_message = Some(format!("Could not open the export folder: {error}"));
         }
     }
 
@@ -674,24 +935,84 @@ impl eframe::App for FirstCallApp {
     }
 
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("top_nav").show_inside(root_ui, |ui| {
-            ui.horizontal(|ui| {
-                for (screen, label) in [
-                    (TopScreen::NewAttempt, "New Attempt"),
-                    (TopScreen::Attempts, "Attempts"),
-                    (TopScreen::Recipes, "Recipes"),
-                    (TopScreen::Settings, "Settings"),
-                ] {
-                    if ui.selectable_label(self.screen == screen, label).clicked() {
-                        self.screen = screen;
+        egui::Panel::top("top_nav")
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::WHITE)
+                    .inner_margin(egui::Margin::symmetric(24, 16)),
+            )
+            .show_inside(root_ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("FirstCall").size(28.0).strong());
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new("Turn one API request into a tool your AI can use.")
+                            .color(egui::Color32::from_rgb(91, 108, 133)),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    for (screen, label) in [
+                        (TopScreen::NewAttempt, "Create a tool"),
+                        (TopScreen::Attempts, "Request history"),
+                        (TopScreen::Recipes, "Verified requests"),
+                        (TopScreen::Settings, "Settings"),
+                    ] {
+                        if ui.selectable_label(self.screen == screen, label).clicked() {
+                            self.screen = screen;
+                        }
                     }
+                });
+                if self.screen == TopScreen::NewAttempt
+                    || self.tool_editor.is_some()
+                    || self.last_native_export.is_some()
+                {
+                    let current =
+                        if self.last_native_export.is_some() && self.screen == TopScreen::Recipes {
+                            3
+                        } else if self.tool_editor.is_some() {
+                            2
+                        } else if self.working_draft.is_some() {
+                            1
+                        } else {
+                            0
+                        };
+                    ui.horizontal(|ui| {
+                        for (index, label) in
+                            ["01  Request", "02  Verify", "03  Describe", "04  Connect"]
+                                .into_iter()
+                                .enumerate()
+                        {
+                            let color = if index == current {
+                                egui::Color32::from_rgb(37, 87, 187)
+                            } else {
+                                egui::Color32::from_rgb(112, 126, 148)
+                            };
+                            ui.label(egui::RichText::new(label).size(14.0).color(color).strong());
+                            if index < 3 {
+                                ui.label(
+                                    egui::RichText::new("—")
+                                        .color(egui::Color32::from_rgb(198, 208, 224)),
+                                );
+                            }
+                        }
+                    });
                 }
-                ui.separator();
                 if let Some(message) = &self.status_message {
-                    ui.label(message);
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(237, 244, 254))
+                        .corner_radius(7)
+                        .inner_margin(egui::Margin::symmetric(12, 8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                egui::RichText::new(message)
+                                    .size(14.0)
+                                    .color(egui::Color32::from_rgb(40, 74, 121)),
+                            );
+                        });
                 }
             });
-        });
 
         match self.screen {
             TopScreen::NewAttempt => self.render_new_attempt(root_ui),
@@ -1487,6 +1808,8 @@ mod tests {
             selected_attempt_id: None,
             recipes: Vec::new(),
             recipe_search: String::new(),
+            tool_editor: None,
+            last_native_export: None,
             auth_slot_inputs: BTreeMap::new(),
             settings: AppSettings::default(),
             paths: AppPaths {

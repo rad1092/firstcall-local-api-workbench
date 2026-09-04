@@ -17,9 +17,13 @@ use crate::model::{
 };
 use crate::util::{looks_like_slot_value, replace_slots};
 
+pub mod bounded;
+
+const REDIRECT_BLOCKED_MESSAGE: &str = "Redirect blocked: use the API's final endpoint URL and verify it again before exporting an MCP tool";
+
 pub fn build_http_client(settings: &AppSettings) -> Result<Client> {
     Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(settings.timeout_secs))
         .build()
         .map_err(anyhow::Error::from)
@@ -105,6 +109,14 @@ fn perform_request(
     let elapsed_ms = started.elapsed().as_millis();
 
     let response_snapshot = match response {
+        Ok(response) if response.status().is_redirection() => ResponseSnapshot {
+            status: Some(response.status().as_u16()),
+            headers: Vec::new(),
+            body_preview: String::new(),
+            elapsed_ms,
+            validation_errors: Vec::new(),
+            transport_error: Some(REDIRECT_BLOCKED_MESSAGE.to_string()),
+        },
         Ok(response) => response_to_snapshot(response, elapsed_ms, settings, draft),
         Err(error) => ResponseSnapshot {
             status: None,
@@ -116,7 +128,9 @@ fn perform_request(
         },
     };
 
-    let notes = if response_snapshot.validation_errors.is_empty() {
+    let notes = if response_snapshot.transport_error.as_deref() == Some(REDIRECT_BLOCKED_MESSAGE) {
+        REDIRECT_BLOCKED_MESSAGE.to_string()
+    } else if response_snapshot.validation_errors.is_empty() {
         "Request executed".to_string()
     } else {
         format!(

@@ -45,6 +45,30 @@ fn run() -> Result<()> {
             println!("firstcall-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        "serve" => {
+            let mut package = None;
+            let mut allow_mutating = false;
+            let mut index = 1;
+            while index < args.len() {
+                match args[index].as_str() {
+                    "--package" if package.is_none() => {
+                        index += 1;
+                        let value = args.get(index).context("--package requires a directory")?;
+                        if value.starts_with("--") {
+                            bail!("--package requires a directory");
+                        }
+                        package = Some(PathBuf::from(value));
+                    }
+                    "--allow-mutating" if !allow_mutating => allow_mutating = true,
+                    _ => bail!("serve accepts --package DIR and optional --allow-mutating"),
+                }
+                index += 1;
+            }
+            firstcall::mcp::serve_stdio(
+                &package.context("serve requires --package DIR")?,
+                firstcall::mcp::ServeOptions { allow_mutating },
+            )
+        }
         "explain" => {
             let recipe_json = required_path_arg(&args[1..], "--recipe-json")?;
             let recipe = read_recipe_json(&recipe_json)?;
@@ -1196,6 +1220,7 @@ fn print_help() {
   firstcall-cli version
   firstcall-cli explain --recipe-json PATH
   firstcall-cli package --recipe-json PATH --out DIR
+  firstcall-cli serve --package DIR [--allow-mutating]
   firstcall-cli package --recipe-id ID --out DIR [--data-dir PATH --config-dir PATH]
   firstcall-cli verify --recipe-json PATH [--out PATH] [--lock-out PATH] [--allow-mutating] [--json]
   firstcall-cli verify --recipe-json PATH [--allow-mutating] [--dry-run|--preflight] [--json]

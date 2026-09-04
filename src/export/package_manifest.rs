@@ -21,11 +21,22 @@ pub(crate) const MANIFESTED_FILES: &[&str] = &[
     "mcp-server/README.md",
 ];
 
+pub(crate) const NATIVE_MANIFESTED_FILES: &[&str] = &[
+    "recipe.yaml",
+    "verified.lock.json",
+    "policy.json",
+    "tool.json",
+    "client-config.json",
+    "README.md",
+];
+
 #[derive(Serialize)]
 struct PackageManifest {
     schema_version: u8,
     generator: String,
     generated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<&'static str>,
     files: Vec<ManifestFile>,
 }
 
@@ -36,7 +47,15 @@ struct ManifestFile {
 }
 
 pub(crate) fn write_package_manifest(out_dir: &Path) -> Result<()> {
-    let manifest = package_manifest(out_dir)?;
+    write_manifest(out_dir, MANIFESTED_FILES, None)
+}
+
+pub(crate) fn write_native_package_manifest(out_dir: &Path) -> Result<()> {
+    write_manifest(out_dir, NATIVE_MANIFESTED_FILES, Some("firstcall-native"))
+}
+
+fn write_manifest(out_dir: &Path, files: &[&str], runtime: Option<&'static str>) -> Result<()> {
+    let manifest = package_manifest(out_dir, files, runtime)?;
     let text = serde_json::to_string_pretty(&manifest)?;
     fs::write(out_dir.join(MANIFEST_FILE), text)
         .with_context(|| format!("Could not write {MANIFEST_FILE}"))?;
@@ -48,8 +67,12 @@ pub(crate) fn sha256_file_hex(path: &Path) -> Result<String> {
     Ok(sha256_hex(&bytes))
 }
 
-fn package_manifest(out_dir: &Path) -> Result<PackageManifest> {
-    let files = MANIFESTED_FILES
+fn package_manifest(
+    out_dir: &Path,
+    paths: &[&str],
+    runtime: Option<&'static str>,
+) -> Result<PackageManifest> {
+    let files = paths
         .iter()
         .map(|relative| {
             let sha256 = sha256_file_hex(&out_dir.join(relative))?;
@@ -64,6 +87,7 @@ fn package_manifest(out_dir: &Path) -> Result<PackageManifest> {
         schema_version: 1,
         generator: GENERATOR.to_string(),
         generated_at: Utc::now().to_rfc3339(),
+        runtime,
         files,
     })
 }

@@ -122,7 +122,59 @@ fn auth_failure_flow() {
     );
 }
 
-fn spawn_server(response: &'static str) -> (String, mpsc::Receiver<String>) {
+#[test]
+fn redirect_cannot_be_verified_as_a_working_native_tool_or_contact_its_destination() {
+    let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+    destination.set_nonblocking(true).unwrap();
+    let (base_url, request_rx) = spawn_server(format!(
+        "HTTP/1.1 302 Found\r\nLocation: http://{}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        destination.local_addr().unwrap()
+    ));
+    let draft = RequestDraft {
+        operation_id: "redirect".into(),
+        name: "Redirecting API".into(),
+        method: "GET".into(),
+        base_url: Some(base_url),
+        path: "/start".into(),
+        headers: vec![],
+        query: vec![],
+        body: BodyTemplate::None,
+        auth: AuthStyle::None,
+        slots: vec![],
+        evidence: vec![],
+        confidence: FieldConfidence {
+            overall: Confidence::High,
+            notes: String::new(),
+        },
+        response_schema: None,
+        unsupported_reason: None,
+        source_kinds: vec![],
+    };
+    // Even a custom status range must not mark a blocked redirect verified.
+    let settings = AppSettings {
+        success_status_max: 399,
+        ..AppSettings::default()
+    };
+    let client = build_http_client(&settings).unwrap();
+    let result = execute_request(&draft, &settings, &client);
+    assert_eq!(result.outcome, firstcall::model::Outcome::Failure);
+    assert_eq!(result.response_snapshot.as_ref().unwrap().status, Some(302));
+    assert!(result.notes.contains("Redirect blocked"));
+    assert!(result.notes.contains("final endpoint URL"));
+    assert!(
+        request_rx
+            .recv()
+            .unwrap()
+            .starts_with("GET /start HTTP/1.1")
+    );
+    assert!(
+        destination.accept().is_err(),
+        "Redirect destination was contacted"
+    );
+}
+
+fn spawn_server(response: impl Into<String>) -> (String, mpsc::Receiver<String>) {
+    let response = response.into();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let address = listener.local_addr().expect("local addr");
     let (tx, rx) = mpsc::channel();

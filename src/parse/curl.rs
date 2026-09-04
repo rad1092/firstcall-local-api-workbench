@@ -270,13 +270,33 @@ fn infer_method(data_chunks: &[String], form_fields: &[KeyValueField], use_get: 
 }
 
 fn split_url(raw: &str) -> (Option<String>, String, Vec<KeyValueField>) {
-    match Url::parse(raw) {
+    // URL parsing percent-encodes braces. Protect actual template tokens before
+    // parsing so they remain parameters; already encoded literal braces stay literal.
+    let pattern = regex::Regex::new(r"\{\{?\s*([a-zA-Z0-9_\-]+)\s*\}?\}").expect("template regex");
+    let mut prefix = "FIRSTCALLURLSLOT".to_string();
+    while raw.contains(&prefix) {
+        prefix.push('X');
+    }
+    let mut replacements = Vec::new();
+    let protected = pattern.replace_all(raw, |capture: &regex::Captures<'_>| {
+        let marker = format!("{prefix}{}END", replacements.len());
+        replacements.push((marker.clone(), slot_token(&capture[1])));
+        marker
+    });
+    let restore = |value: &str| {
+        replacements
+            .iter()
+            .fold(value.to_string(), |text, (marker, token)| {
+                text.replace(marker, token)
+            })
+    };
+    match Url::parse(&protected) {
         Ok(url) => {
             let mut query = Vec::new();
             for (key, value) in url.query_pairs() {
                 query.push(KeyValueField {
                     key: key.to_string(),
-                    value: value.to_string(),
+                    value: restore(&value),
                     required: false,
                     description: "Parsed from URL query string".to_string(),
                     confidence: Confidence::High,
@@ -290,7 +310,7 @@ fn split_url(raw: &str) -> (Option<String>, String, Vec<KeyValueField>) {
                     .map(|port| format!(":{port}"))
                     .unwrap_or_default()
             );
-            (Some(base_url), url.path().to_string(), query)
+            (Some(base_url), restore(url.path()), query)
         }
         Err(_) => (None, raw.to_string(), Vec::new()),
     }
@@ -335,16 +355,12 @@ fn parse_key_value_pairs(raw: &str) -> Vec<KeyValueField> {
 }
 
 fn normalize_path_template(path: &str) -> String {
-    let mut normalized = path.to_string();
-    for capture in regex::Regex::new(r"\{([a-zA-Z0-9_\-]+)\}")
+    regex::Regex::new(r"\{\{?\s*([a-zA-Z0-9_\-]+)\s*\}?\}")
         .expect("path regex")
-        .captures_iter(path)
-    {
-        let full = capture.get(0).map(|item| item.as_str()).unwrap_or_default();
-        let name = capture.get(1).map(|item| item.as_str()).unwrap_or_default();
-        normalized = normalized.replace(full, &slot_token(name));
-    }
-    normalized
+        .replace_all(path, |capture: &regex::Captures<'_>| {
+            slot_token(&capture[1])
+        })
+        .into_owned()
 }
 
 fn collect_slots(
@@ -499,6 +515,34 @@ fn dedupe_slots(slots: &mut Vec<RuntimeSlot>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn preserves_curl_path_parameters_without_encoding_or_extra_braces() {
+        for token in ["{owner}", "{{owner}}"] {
+            let parsed = super::parse_curl_input(&format!(
+                "curl 'https://api.example.com/repos/{token}/{{{{repo}}}}?page={{{{page}}}}'"
+            ));
+            let draft = &parsed.candidates[0];
+            assert_eq!(draft.path, "/repos/{{owner}}/{{repo}}");
+            assert!(
+                draft.slots.iter().any(|slot| slot.name == "owner"
+                    && slot.location == crate::model::SlotLocation::Path)
+            );
+            assert!(draft.slots.iter().any(
+                |slot| slot.name == "repo" && slot.location == crate::model::SlotLocation::Path
+            ));
+            assert_eq!(draft.query[0].value, "{{page}}");
+        }
+    }
+
+    #[test]
+    fn encoded_literal_braces_are_not_promoted_to_parameters() {
+        let parsed =
+            super::parse_curl_input("curl 'https://api.example.com/items/%7Bliteral%7D/{{item}}'");
+        let draft = &parsed.candidates[0];
+        assert_eq!(draft.path, "/items/%7Bliteral%7D/{{item}}");
+        assert_eq!(draft.slots.len(), 1);
+        assert_eq!(draft.slots[0].name, "item");
+    }
     use super::parse_curl_input;
     use crate::model::{AuthStyle, BodyTemplate, SourceKind};
 

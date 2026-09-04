@@ -8,7 +8,13 @@ use regex::Regex;
 use serde_json::Value;
 
 use super::agent_common::{GENERATOR, looks_destructive_path};
-use super::package_manifest::{MANIFEST_FILE, MANIFESTED_FILES, sha256_file_hex};
+use super::native_package::{
+    NativeToolDefinition, is_mutating_recipe, required_environment, validate_tool_definition,
+};
+use super::package_import::recipe_from_agent_package_dir;
+use super::package_manifest::{
+    MANIFEST_FILE, MANIFESTED_FILES, NATIVE_MANIFESTED_FILES, sha256_file_hex,
+};
 use crate::exec::redact::redact_free_text;
 
 const REQUIRED_DIRS: &[&str] = &["mcp-server", "mcp-server/src"];
@@ -101,6 +107,93 @@ pub fn validate_agent_package_dir(path: &Path) -> PackageValidationReport {
     validate_agent_package_dir_with_options(path, PackageValidationOptions::default())
 }
 
+fn is_native_package(root: &Path) -> bool {
+    fs::read_to_string(root.join(MANIFEST_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .is_some_and(|manifest| {
+            manifest.get("runtime").and_then(Value::as_str) == Some("firstcall-native")
+        })
+}
+
+fn expected_files(root: &Path) -> &'static [&'static str] {
+    if is_native_package(root) {
+        NATIVE_MANIFESTED_FILES
+    } else {
+        MANIFESTED_FILES
+    }
+}
+
+fn validate_native_tool(root: &Path, report: &mut PackageValidationReport) {
+    let Some(value) = read_json(root, "tool.json", report) else {
+        return;
+    };
+    let tool = match serde_json::from_value::<NativeToolDefinition>(value) {
+        Ok(tool) => tool,
+        Err(_) => {
+            report.error("tool.json must contain the native tool definition fields");
+            return;
+        }
+    };
+    let recipe = match recipe_from_agent_package_dir(root) {
+        Ok(recipe) => recipe,
+        Err(_) => {
+            report.error("Native tool recipe could not be read");
+            return;
+        }
+    };
+    match validate_tool_definition(&recipe, &tool) {
+        Ok(()) => report.pass("tool.json describes only the verified nonsecret request inputs"),
+        Err(error) => report.error(format!("tool.json: {error}")),
+    }
+    let Some(config) = read_json(root, "client-config.json", report) else {
+        return;
+    };
+    let Some(servers) = config.get("mcpServers").and_then(Value::as_object) else {
+        report.error("client-config.json must contain mcpServers");
+        return;
+    };
+    if servers.len() != 1 || !servers.contains_key(&tool.name) {
+        report.error("client-config.json must contain exactly the named tool server");
+        return;
+    }
+    let server = &servers[&tool.name];
+    let command = server
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !Path::new(command).is_absolute() {
+        report.error("client-config.json command must be an absolute executable path");
+    }
+    let args = server.get("args").and_then(Value::as_array);
+    if !args.is_some_and(|args| {
+        (args.len() == 3
+            || (args.len() == 4 && args[3] == "--allow-mutating" && is_mutating_recipe(&recipe)))
+            && args[0] == "serve"
+            && args[1] == "--package"
+            && args[2]
+                .as_str()
+                .is_some_and(|path| Path::new(path).is_absolute())
+            && (!is_mutating_recipe(&recipe) || args.len() == 4)
+    }) {
+        report.error("client-config.json must run serve --package with an absolute package path");
+    }
+    let Some(env) = server.get("env").and_then(Value::as_object) else {
+        report.error("client-config.json must declare environment placeholders");
+        return;
+    };
+    if env.values().any(|value| value.as_str() != Some("")) {
+        report.error("client-config.json must contain empty environment placeholders, never credential values");
+    }
+    let expected = required_environment(&recipe)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if env.keys().cloned().collect::<BTreeSet<_>>() != expected {
+        report.error("client-config.json environment names must match the request");
+    }
+    report.pass("native MCP runtime requires no Node installation or generated build");
+}
+
 pub fn validate_agent_package_dir_with_options(
     path: &Path,
     options: PackageValidationOptions,
@@ -130,11 +223,21 @@ pub fn validate_agent_package_dir_with_options(
     validate_recipe_yaml(path, &mut report);
     validate_verified_lock(path, &mut report);
     validate_policy(path, &mut report);
-    validate_mcp_server(path, &mut report);
-    validate_package_json(path, &mut report);
-    validate_tsconfig_json(path, &mut report);
+    if is_native_package(path) {
+        validate_native_tool(path, &mut report);
+    } else {
+        validate_mcp_server(path, &mut report);
+        validate_package_json(path, &mut report);
+        validate_tsconfig_json(path, &mut report);
+    }
     validate_package_manifest(path, &mut report);
-    if options.mcp_compile_smoke {
+    if options.mcp_compile_smoke && is_native_package(path) {
+        set_mcp_smoke_status(
+            &mut report,
+            McpCompileSmokeStatus::Warning,
+            "Native MCP packages run directly with firstcall-cli; TypeScript compilation does not apply",
+        );
+    } else if options.mcp_compile_smoke {
         run_mcp_compile_smoke(path, &mut report);
     }
 
@@ -163,7 +266,11 @@ fn validate_package_root(path: &Path, report: &mut PackageValidationReport) -> b
 }
 
 fn validate_required_layout(root: &Path, report: &mut PackageValidationReport) {
-    for relative in REQUIRED_DIRS {
+    for relative in if is_native_package(root) {
+        &[][..]
+    } else {
+        REQUIRED_DIRS
+    } {
         let path = root.join(relative);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -186,7 +293,7 @@ fn validate_required_layout(root: &Path, report: &mut PackageValidationReport) {
         }
     }
 
-    for relative in MANIFESTED_FILES {
+    for relative in expected_files(root) {
         let path = root.join(relative);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -209,6 +316,12 @@ fn validate_required_layout(root: &Path, report: &mut PackageValidationReport) {
 }
 
 fn validate_extra_entries(root: &Path, report: &mut PackageValidationReport) {
+    if is_native_package(root) {
+        let mut expected = NATIVE_MANIFESTED_FILES.to_vec();
+        expected.push(MANIFEST_FILE);
+        warn_extra_entries(root, "", &expected, report);
+        return;
+    }
     warn_extra_entries(
         root,
         "",
@@ -849,6 +962,11 @@ fn validate_package_manifest(root: &Path, report: &mut PackageValidationReport) 
     };
     report.pass(format!("{MANIFEST_FILE} parses as JSON"));
     check_u64_field(report, &value, MANIFEST_FILE, "schema_version", 1);
+    if let Some(runtime) = value.get("runtime")
+        && runtime != "firstcall-native"
+    {
+        report.error("package.manifest.json runtime must be firstcall-native when present");
+    }
     check_string_field(report, &value, MANIFEST_FILE, "generator", Some(GENERATOR));
     validate_manifest_generated_at(&value, report);
     validate_manifest_files(root, &value, report);
@@ -913,7 +1031,7 @@ fn validate_manifest_files(root: &Path, value: &Value, report: &mut PackageValid
         report.error(format!("manifest duplicate path: {path}"));
     }
 
-    for expected in MANIFESTED_FILES {
+    for expected in expected_files(root) {
         if entries.contains_key(*expected) {
             report.pass(format!("manifest includes expected file: {expected}"));
         } else {
@@ -958,7 +1076,7 @@ fn validate_manifest_file_hash(
         return;
     };
     if actual_sha256 == expected_sha256 {
-        if MANIFESTED_FILES.contains(&relative) {
+        if expected_files(root).contains(&relative) {
             report.pass(format!("manifest hash matches: {relative}"));
         } else {
             report.warn(format!("manifest includes unexpected file: {relative}"));
@@ -969,7 +1087,7 @@ fn validate_manifest_file_hash(
 }
 
 fn scan_expected_text_files(root: &Path, report: &mut PackageValidationReport) {
-    for relative in MANIFESTED_FILES {
+    for relative in expected_files(root) {
         let Some(text) = read_expected_text(root, relative, report) else {
             continue;
         };

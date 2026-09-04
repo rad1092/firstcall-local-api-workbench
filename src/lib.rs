@@ -2,6 +2,7 @@
 pub mod app;
 pub mod exec;
 pub mod export;
+pub mod mcp;
 pub mod merge;
 pub mod model;
 pub mod parse;

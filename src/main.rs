@@ -24,11 +24,19 @@ fn main() {
         .without_time()
         .init();
 
-    let native_options = NativeOptions::default();
+    let native_options = NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 820.0])
+            .with_min_inner_size([1050.0, 700.0]),
+        ..NativeOptions::default()
+    };
     if let Err(error) = eframe::run_native(
         "FirstCall",
         native_options,
-        Box::new(|_cc| Ok(Box::new(FirstCallApp::bootstrap_with_options(options)))),
+        Box::new(|cc| {
+            firstcall::app::configure_theme(&cc.egui_ctx);
+            Ok(Box::new(FirstCallApp::bootstrap_with_options(options)))
+        }),
     ) {
         eprintln!("FirstCall failed to start: {error}");
     }

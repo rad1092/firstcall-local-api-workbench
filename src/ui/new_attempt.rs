@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use eframe::egui;
 
-use crate::app::{FirstCallApp, InputTab};
+use crate::app::{FirstCallApp, InputTab, primary_button};
 use crate::exec::redact::{redact_request, redact_response};
 use crate::model::{BodyTemplate, HeaderField, KeyValueField, Outcome, SlotLocation, SourceKind};
 
@@ -11,34 +11,38 @@ impl FirstCallApp {
         let is_running = self.is_running();
         egui::Panel::left("new_attempt_inputs")
             .resizable(true)
-            .default_size(360.0)
+            .default_size(350.0)
+            .min_size(280.0)
+            .max_size(460.0)
+            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(247, 249, 253)).inner_margin(18))
             .show_inside(root_ui, |ui| {
-                ui.heading("Request Sources");
+                egui::ScrollArea::vertical().id_salt("source-panel-scroll").show(ui, |ui| {
+                ui.label(egui::RichText::new("Request source").size(21.0).strong());
+                ui.small("Start with a request you want your AI to use.");
+                ui.add_space(4.0);
                 ui.add_enabled_ui(!is_running, |ui| {
                     egui::ComboBox::from_label("Source kind")
                         .selected_text(self.inputs.active_tab.label())
                         .show_ui(ui, |ui| {
-                            for tab in InputTab::ALL {
+                            for tab in [InputTab::Curl, InputTab::OpenApi] {
+                                ui.selectable_value(&mut self.inputs.active_tab, tab, tab.label());
+                            }
+                            ui.separator();
+                            ui.label("Other request formats");
+                            for tab in InputTab::ALL.into_iter().filter(|tab| !matches!(tab, InputTab::Curl | InputTab::OpenApi)) {
                                 ui.selectable_value(&mut self.inputs.active_tab, tab, tab.label());
                             }
                         });
                 });
-                ui.small(self.inputs.active_tab.description());
-                ui.separator();
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .add_enabled(
                             !is_running && self.inputs.active_tab.has_sample(),
-                            egui::Button::new("Load Sample"),
+                            egui::Button::new("Try an example"),
                         )
                         .clicked()
                     {
                         self.load_sample_for_active_tab();
-                    }
-                    if ui
-                        .add_enabled(!is_running, egui::Button::new("Analyze Sources"))
-                        .clicked()
-                    {
                         self.analyze_inputs();
                     }
                     if ui
@@ -48,24 +52,25 @@ impl FirstCallApp {
                         self.reset_inputs();
                     }
                 });
-                ui.separator();
                 let active_tab = self.inputs.active_tab;
                 let hint = active_tab.hint();
                 let buffer = self.inputs.buffer_mut(active_tab);
                 ui.add_enabled_ui(!is_running, |ui| {
                     ui.add(
                         egui::TextEdit::multiline(buffer)
-                            .desired_rows(24)
+                            .code_editor()
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(12)
+                            .margin(12.0)
                             .hint_text(hint),
                     );
                 });
-                ui.separator();
-                ui.label("Parse notes");
-                egui::ScrollArea::vertical()
-                    .max_height(190.0)
-                    .show(ui, |ui| {
+                if ui.add_enabled(!is_running, primary_button("Read request")).clicked() { self.analyze_inputs(); }
+                ui.small("The request is read locally. Nothing is sent until you choose Send and verify.");
+                ui.add_space(10.0);
+                ui.collapsing("Import details", |ui| {
                         if self.parsed_sources.is_empty() {
-                            ui.small("Analyze one or more source buffers to see parser notes.");
+                            ui.small("Read a request to see parser notes and supported operations.");
                         }
                         for parsed in &self.parsed_sources {
                             ui.horizontal(|ui| {
@@ -81,166 +86,204 @@ impl FirstCallApp {
                             }
                             ui.separator();
                         }
-                    });
+                });
+                });
             });
 
         egui::Panel::right("new_attempt_runtime")
             .resizable(true)
-            .default_size(380.0)
+            .default_size(330.0)
+            .min_size(280.0)
+            .max_size(430.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(247, 249, 253))
+                    .inner_margin(18),
+            )
             .show_inside(root_ui, |ui| {
-                ui.heading("Run");
-                if let Some(draft) = self.working_draft.as_ref() {
-                    let missing_required = self.missing_required_slot_count(draft);
-                    ui.label(format!("Auth: {}", draft.auth.label()));
-                    let missing_text = format!("Missing required slots: {missing_required}");
-                    if missing_required > 0 {
-                        ui.colored_label(egui::Color32::YELLOW, missing_text);
-                    } else {
-                        ui.label(missing_text);
-                    }
-                }
-
-                if let Some(draft) = self.working_draft.as_ref() {
-                    let slots = draft.slots.clone();
-                    let stored_auth_slots: BTreeSet<String> = slots
-                        .iter()
-                        .filter(|slot| slot.location == SlotLocation::Auth)
-                        .filter(|slot| self.auth_slot_is_stored(&slot.name))
-                        .map(|slot| slot.name.clone())
-                        .collect();
-                    let mut slot_updates = Vec::<(usize, Option<String>)>::new();
-                    let mut auth_saves = Vec::<(String, String)>::new();
-
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .max_height(290.0)
-                        .show(ui, |ui| {
-                            for location in [
-                                SlotLocation::Auth,
-                                SlotLocation::Path,
-                                SlotLocation::Query,
-                                SlotLocation::Header,
-                                SlotLocation::Body,
-                            ] {
-                                let indexes = slots
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, slot)| slot.location == location)
-                                    .map(|(index, _)| index)
-                                    .collect::<Vec<_>>();
-                                if indexes.is_empty() {
-                                    continue;
-                                }
-
-                                ui.strong(format!("{} slots", location.label()));
-                                for index in indexes {
-                                    let slot = &slots[index];
-                                    ui.horizontal(|ui| {
-                                        ui.label(&slot.name);
-                                        ui.small(if slot.required {
-                                            "required"
-                                        } else {
-                                            "optional"
-                                        });
-                                    });
-
-                                    if location == SlotLocation::Auth {
-                                        let stored = stored_auth_slots.contains(&slot.name);
-                                        if stored {
-                                            ui.small(format!(
-                                                "Stored in {}. Value is not displayed.",
-                                                self.secret_status.backend
-                                            ));
-                                        }
-                                        let entry = self
-                                            .auth_slot_inputs
-                                            .entry(slot.name.clone())
-                                            .or_default();
-                                        ui.horizontal(|ui| {
-                                            ui.add_enabled(
-                                                !is_running,
-                                                egui::TextEdit::singleline(entry)
-                                                    .password(true)
-                                                    .hint_text("enter secret value"),
-                                            );
-                                            if ui
-                                                .add_enabled(
-                                                    !is_running && !entry.trim().is_empty(),
-                                                    egui::Button::new("Save secret"),
-                                                )
-                                                .clicked()
-                                            {
-                                                auth_saves.push((slot.name.clone(), entry.clone()));
-                                            }
-                                        });
-                                    } else {
-                                        let mut value =
-                                            slot.current_value.clone().unwrap_or_default();
-                                        if ui
-                                            .add_enabled(
-                                                !is_running,
-                                                egui::TextEdit::singleline(&mut value),
-                                            )
-                                            .changed()
-                                        {
-                                            let next_value = if value.trim().is_empty() {
-                                                None
-                                            } else {
-                                                Some(value)
-                                            };
-                                            slot_updates.push((index, next_value));
-                                        }
-                                    }
-
-                                    if !slot.description.is_empty() {
-                                        ui.small(&slot.description);
-                                    }
-                                    ui.separator();
-                                }
-                            }
-                        });
-
-                    if let Some(draft) = &mut self.working_draft {
-                        for (index, value) in slot_updates {
-                            if let Some(slot) = draft.slots.get_mut(index) {
-                                slot.current_value = value;
+                egui::ScrollArea::vertical()
+                    .id_salt("verify-panel-scroll")
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("Verification").size(21.0).strong());
+                        ui.small("Use real inputs to confirm this operation works.");
+                        if let Some(draft) = self.working_draft.as_ref() {
+                            let missing_required = self.missing_required_slot_count(draft);
+                            ui.small(format!("Authentication · {}", draft.auth.label()));
+                            let missing_text = if missing_required == 0 {
+                                "Required inputs are ready".to_string()
+                            } else {
+                                format!("{missing_required} required input(s) need a value")
+                            };
+                            if missing_required > 0 {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(153, 88, 15),
+                                    missing_text,
+                                );
+                            } else {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(31, 117, 95),
+                                    missing_text,
+                                );
                             }
                         }
-                    }
-                    for (slot_name, value) in auth_saves {
-                        self.store_auth_slot_value(&slot_name, value);
-                        self.auth_slot_inputs.remove(&slot_name);
-                    }
 
-                    if ui
-                        .add_enabled(!is_running, egui::Button::new("Run Request"))
-                        .clicked()
-                    {
-                        self.run_current_draft();
-                    }
-                    if ui
-                        .add_enabled(!is_running, egui::Button::new("Save Successful Recipe"))
-                        .clicked()
-                    {
-                        self.save_current_recipe();
-                    }
-                } else {
-                    ui.label("Analyze input and select a candidate to run.");
-                }
+                        if let Some(draft) = self.working_draft.as_ref() {
+                            let slots = draft.slots.clone();
+                            let stored_auth_slots: BTreeSet<String> = slots
+                                .iter()
+                                .filter(|slot| slot.location == SlotLocation::Auth)
+                                .filter(|slot| self.auth_slot_is_stored(&slot.name))
+                                .map(|slot| slot.name.clone())
+                                .collect();
+                            let mut slot_updates = Vec::<(usize, Option<String>)>::new();
+                            let mut auth_saves = Vec::<(String, String)>::new();
 
-                ui.separator();
-                render_result(ui, self.last_execution.as_ref());
+                            ui.separator();
+                            egui::ScrollArea::vertical()
+                                .max_height(290.0)
+                                .show(ui, |ui| {
+                                    for location in [
+                                        SlotLocation::Auth,
+                                        SlotLocation::Path,
+                                        SlotLocation::Query,
+                                        SlotLocation::Header,
+                                        SlotLocation::Body,
+                                    ] {
+                                        let indexes = slots
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, slot)| slot.location == location)
+                                            .map(|(index, _)| index)
+                                            .collect::<Vec<_>>();
+                                        if indexes.is_empty() {
+                                            continue;
+                                        }
+
+                                        ui.strong(format!("{} inputs", location.label()));
+                                        for index in indexes {
+                                            let slot = &slots[index];
+                                            ui.horizontal(|ui| {
+                                                ui.label(&slot.name);
+                                                ui.small(if slot.required {
+                                                    "required"
+                                                } else {
+                                                    "optional"
+                                                });
+                                            });
+
+                                            if location == SlotLocation::Auth {
+                                                let stored = stored_auth_slots.contains(&slot.name);
+                                                if stored {
+                                                    ui.small(format!(
+                                                        "Stored in {}. Value is not displayed.",
+                                                        self.secret_status.backend
+                                                    ));
+                                                }
+                                                let entry = self
+                                                    .auth_slot_inputs
+                                                    .entry(slot.name.clone())
+                                                    .or_default();
+                                                ui.vertical(|ui| {
+                                                    ui.add_enabled(
+                                                        !is_running,
+                                                        egui::TextEdit::singleline(entry)
+                                                            .password(true)
+                                                            .desired_width(f32::INFINITY)
+                                                            .hint_text("enter secret value"),
+                                                    );
+                                                    if ui
+                                                        .add_enabled(
+                                                            !is_running && !entry.trim().is_empty(),
+                                                            egui::Button::new("Save secret"),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        auth_saves.push((
+                                                            slot.name.clone(),
+                                                            entry.clone(),
+                                                        ));
+                                                    }
+                                                });
+                                            } else {
+                                                let mut value =
+                                                    slot.current_value.clone().unwrap_or_default();
+                                                if ui
+                                                    .add_enabled(
+                                                        !is_running,
+                                                        egui::TextEdit::singleline(&mut value)
+                                                            .desired_width(f32::INFINITY),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    let next_value = if value.trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(value)
+                                                    };
+                                                    slot_updates.push((index, next_value));
+                                                }
+                                            }
+
+                                            if !slot.description.is_empty() {
+                                                ui.small(&slot.description);
+                                            }
+                                            ui.separator();
+                                        }
+                                    }
+                                });
+
+                            if let Some(draft) = &mut self.working_draft {
+                                for (index, value) in slot_updates {
+                                    if let Some(slot) = draft.slots.get_mut(index) {
+                                        slot.current_value = value;
+                                    }
+                                }
+                            }
+                            for (slot_name, value) in auth_saves {
+                                self.store_auth_slot_value(&slot_name, value);
+                                self.auth_slot_inputs.remove(&slot_name);
+                            }
+
+                            if ui
+                                .add_enabled(
+                                    !is_running,
+                                    primary_button(if is_running {
+                                        "Sending request…"
+                                    } else {
+                                        "Send and verify"
+                                    }),
+                                )
+                                .clicked()
+                            {
+                                self.run_current_draft();
+                            }
+                            if ui
+                                .add_enabled(
+                                    !is_running
+                                        && self.last_successful_draft.is_some()
+                                        && self.last_execution.as_ref().is_some_and(|result| {
+                                            result.outcome == Outcome::Success
+                                        }),
+                                    primary_button("Continue to MCP tool"),
+                                )
+                                .clicked()
+                            {
+                                self.save_current_recipe();
+                            }
+                        } else {
+                            ui.label("Read a request and choose an operation to verify it.");
+                        }
+
+                        ui.separator();
+                        render_result(ui, self.last_execution.as_ref());
+                    });
             });
 
-        egui::CentralPanel::default().show_inside(root_ui, |ui| {
-            ui.heading("Candidates And Builder");
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label(format!("Candidates: {}", self.candidate_drafts.len()));
-                if let Some(index) = self.selected_candidate {
-                    ui.label(format!("Selected: {}", index + 1));
-                }
-            });
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(egui::Color32::WHITE).inner_margin(20)).show_inside(root_ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("operation-panel-scroll").show(ui, |ui| {
+            ui.label(egui::RichText::new("Operation").size(21.0).strong());
+            ui.small("Review the API before sending a request.");
+            ui.add_space(4.0);
             egui::ScrollArea::vertical()
                 .max_height(145.0)
                 .show(ui, |ui| {
@@ -257,13 +300,9 @@ impl FirstCallApp {
                             .add_enabled_ui(!is_running, |ui| {
                                 ui.selectable_label(
                                     selected,
-                                    format!(
-                                        "{} [{}] {}",
-                                        candidate.endpoint_summary(),
-                                        candidate.confidence.overall.label(),
-                                        source_kinds
-                                    ),
+                                    format!("{}  {}", candidate.method, candidate.name),
                                 )
+                                .on_hover_text(format!("{} · {}", candidate.endpoint_summary(), source_kinds))
                                 .clicked()
                             })
                             .inner
@@ -275,7 +314,7 @@ impl FirstCallApp {
 
             ui.separator();
             if let Some(draft) = &mut self.working_draft {
-                ui.strong(format!("{} {}", draft.method, draft.endpoint_summary()));
+                ui.label(egui::RichText::new(draft.endpoint_summary()).monospace().size(14.0));
                 ui.small(format!(
                     "Sources: {}",
                     draft
@@ -285,36 +324,24 @@ impl FirstCallApp {
                         .collect::<Vec<_>>()
                         .join(", ")
                 ));
-                ui.small(format!(
-                    "Confidence: {} - {}",
-                    draft.confidence.overall.label(),
-                    draft.confidence.notes
-                ));
                 if let Some(reason) = &draft.unsupported_reason {
-                    ui.colored_label(egui::Color32::YELLOW, format!("Unsupported: {reason}"));
+                    ui.colored_label(egui::Color32::from_rgb(153, 88, 15), format!("Unsupported: {reason}"));
                 }
                 ui.separator();
 
                 ui.add_enabled_ui(!is_running, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Name");
-                        ui.text_edit_singleline(&mut draft.name);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Method");
-                        ui.text_edit_singleline(&mut draft.method);
-                        ui.label("Base URL");
+                    ui.label("Operation name");
+                    ui.add(egui::TextEdit::singleline(&mut draft.name).desired_width(f32::INFINITY));
+                    ui.horizontal(|ui| { ui.label("Method"); ui.add(egui::TextEdit::singleline(&mut draft.method).desired_width(90.0)); });
+                    ui.label("Base URL");
                         if draft.base_url.is_none() {
                             draft.base_url = Some(String::new());
                         }
                         if let Some(base_url) = &mut draft.base_url {
-                            ui.text_edit_singleline(base_url);
+                            ui.add(egui::TextEdit::singleline(base_url).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
                         }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Path");
-                        ui.text_edit_singleline(&mut draft.path);
-                    });
+                    ui.label("Path");
+                    ui.add(egui::TextEdit::singleline(&mut draft.path).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
 
                     ui.collapsing("Headers", |ui| {
                         edit_headers(ui, &mut draft.headers);
@@ -328,9 +355,10 @@ impl FirstCallApp {
                 });
 
                 ui.separator();
-                ui.label("Evidence");
+                ui.collapsing("How this request was read", |ui| {
+                ui.small(format!("{} · {}", draft.confidence.overall.label(), draft.confidence.notes));
                 for item in &draft.evidence {
-                    ui.label(format!(
+                    ui.small(format!(
                         "- {} [{}:{}] {}",
                         item.label,
                         source_kind_label(&item.source_kind),
@@ -338,25 +366,43 @@ impl FirstCallApp {
                         item.detail
                     ));
                 }
+                });
             } else {
-                ui.label("No candidate selected.");
+                ui.add_space(24.0);
+                ui.strong("Your API operation will appear here");
+                ui.label("Paste a request on the left, or try the public GitHub example to start without credentials.");
             }
+            });
         });
     }
 }
 
 fn render_result(ui: &mut egui::Ui, result: Option<&crate::model::ExecutionResult>) {
-    ui.heading("Result");
+    ui.label(egui::RichText::new("Response").size(19.0).strong());
     let Some(result) = result else {
-        ui.label("No request has been executed yet.");
+        ui.small("The API response will appear here after verification.");
         return;
     };
 
     let request = redact_request(&result.rendered_request);
-    ui.label(format!("Request: {} {}", request.method, request.url));
-    ui.label(format!("Outcome: {}", result.outcome.label()));
+    ui.small(format!("{} {}", request.method, request.url));
+    let (label, color) = match result.outcome {
+        Outcome::Success => (
+            "Verified successfully",
+            egui::Color32::from_rgb(31, 117, 95),
+        ),
+        Outcome::Partial => (
+            "Response needs attention",
+            egui::Color32::from_rgb(153, 88, 15),
+        ),
+        Outcome::Failure => (
+            "Request could not be verified",
+            egui::Color32::from_rgb(173, 44, 56),
+        ),
+    };
+    ui.label(egui::RichText::new(label).strong().color(color));
     if let Some(blocker) = &result.blocker {
-        ui.label(format!("Blocker: {}", blocker.label()));
+        ui.small(blocker.label());
     }
     if !result.notes.is_empty() {
         ui.small(&result.notes);
@@ -364,37 +410,39 @@ fn render_result(ui: &mut egui::Ui, result: Option<&crate::model::ExecutionResul
 
     if let Some(response) = result.response_snapshot.as_ref().map(redact_response) {
         ui.label(format!(
-            "Status: {}",
+            "HTTP {} · {} ms",
             response
                 .status
                 .map(|status| status.to_string())
-                .unwrap_or_else(|| "n/a".to_string())
+                .unwrap_or_else(|| "—".to_string()),
+            response.elapsed_ms
         ));
-        ui.label(format!("Elapsed: {} ms", response.elapsed_ms));
         if let Some(error) = &response.transport_error {
-            ui.colored_label(egui::Color32::YELLOW, error);
+            ui.colored_label(egui::Color32::from_rgb(173, 44, 56), error);
         }
         if !response.validation_errors.is_empty() {
-            ui.colored_label(egui::Color32::YELLOW, "Validation errors");
+            ui.colored_label(egui::Color32::from_rgb(153, 88, 15), "Validation details");
             for error in &response.validation_errors {
                 ui.label(format!("- {error}"));
             }
         }
-        ui.separator();
-        ui.label("Headers");
-        egui::ScrollArea::vertical()
-            .max_height(90.0)
-            .show(ui, |ui| {
-                for header in &response.headers {
-                    ui.label(format!("{}: {}", header.key, header.value));
-                }
-            });
+        ui.collapsing("Response headers", |ui| {
+            for header in &response.headers {
+                ui.small(format!("{}: {}", header.key, header.value));
+            }
+        });
         ui.separator();
         ui.label("Body preview");
-        let mut preview = response.body_preview;
+        let mut preview = serde_json::from_str::<serde_json::Value>(&response.body_preview)
+            .ok()
+            .and_then(|value| serde_json::to_string_pretty(&value).ok())
+            .unwrap_or(response.body_preview);
         ui.add(
             egui::TextEdit::multiline(&mut preview)
-                .desired_rows(14)
+                .code_editor()
+                .desired_width(f32::INFINITY)
+                .desired_rows(8)
+                .margin(10)
                 .interactive(false),
         );
     } else if result.outcome == Outcome::Failure {
@@ -419,9 +467,17 @@ fn source_kind_label(kind: &SourceKind) -> &'static str {
 fn edit_headers(ui: &mut egui::Ui, headers: &mut Vec<HeaderField>) {
     let mut remove = None;
     for (index, header) in headers.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut header.key);
-            ui.text_edit_singleline(&mut header.value);
+        ui.group(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut header.key)
+                    .hint_text("Header name")
+                    .desired_width(f32::INFINITY),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut header.value)
+                    .hint_text("Header value")
+                    .desired_width(f32::INFINITY),
+            );
             if ui.small_button("Remove").clicked() {
                 remove = Some(index);
             }
@@ -444,9 +500,17 @@ fn edit_headers(ui: &mut egui::Ui, headers: &mut Vec<HeaderField>) {
 fn edit_query(ui: &mut egui::Ui, query: &mut Vec<KeyValueField>) {
     let mut remove = None;
     for (index, item) in query.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut item.key);
-            ui.text_edit_singleline(&mut item.value);
+        ui.group(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut item.key)
+                    .hint_text("Parameter name")
+                    .desired_width(f32::INFINITY),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut item.value)
+                    .hint_text("Parameter value")
+                    .desired_width(f32::INFINITY),
+            );
             if ui.small_button("Remove").clicked() {
                 remove = Some(index);
             }
@@ -493,7 +557,13 @@ fn edit_body(ui: &mut egui::Ui, body: &mut BodyTemplate) {
             };
             *body = BodyTemplate::Json { template };
             if let BodyTemplate::Json { template } = body {
-                ui.add(egui::TextEdit::multiline(template).desired_rows(12));
+                ui.add(
+                    egui::TextEdit::multiline(template)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(8)
+                        .margin(10),
+                );
             }
         }
         "text" => {
@@ -503,7 +573,13 @@ fn edit_body(ui: &mut egui::Ui, body: &mut BodyTemplate) {
             };
             *body = BodyTemplate::Text { text };
             if let BodyTemplate::Text { text } = body {
-                ui.add(egui::TextEdit::multiline(text).desired_rows(8));
+                ui.add(
+                    egui::TextEdit::multiline(text)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(8)
+                        .margin(10),
+                );
             }
         }
         "form" => {
